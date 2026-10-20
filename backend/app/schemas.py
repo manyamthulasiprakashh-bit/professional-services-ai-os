@@ -192,8 +192,10 @@ class AssistantRequest(BaseModel):
 class AssistantEvidence(BaseModel):
     """A supporting business-record reference.
 
-    Reserved for a later step that retrieves real workspace records. Until
-    then every response carries an empty evidence list.
+    Built server-side by the assistant service from the rows retrieval actually
+    returned (clients, matters, tasks, and document chunks). Each instance
+    points at a real existing record with a stable reference; evidence is never
+    taken from model output.
     """
 
     kind: str = Field(..., description="Record type, e.g. client, matter, task")
@@ -204,9 +206,12 @@ class AssistantEvidence(BaseModel):
 class AssistantResponse(BaseModel):
     """Read-only assistant answer.
 
-    `evidence` is always empty and `evidence_sufficient` is always false in
-    this step: the model has not been shown any business records, so the
-    answer is an unverified model opinion that requires human review.
+    `evidence` holds server-built references to the business records retrieval
+    actually returned (clients, matters, tasks and document chunks); it is never
+    taken from model output, and it is empty only when retrieval found nothing.
+    `evidence_sufficient` is true exactly when retrieval returned at least one
+    record — never inferred from how confident the answer sounds. The `answer`
+    itself is machine-generated and requires human review.
     """
 
     answer: str

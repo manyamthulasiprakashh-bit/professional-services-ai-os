@@ -1,12 +1,62 @@
 # Professional Services AI OS (prototype)
 
-Independent prototype of an AI-powered operating system for professional
-services businesses. It is **not** a Stanford Innovations product.
+A local-first, AI-assisted workspace for professional services workflows,
+combining client and matter management, document intelligence, task workflows,
+and a human-approved AI assistant. Independent prototype; it is **not** a
+Stanford Innovations product.
 
-Current milestone: **Phase 5, Step 5.5 — human approval and controlled
-execution** on top of the Step 5.1–5.4 assistant. **Do not enter real or
-confidential client data** — this is an unauthenticated local prototype with
-files stored unencrypted on disk.
+**Built with:** Python · FastAPI · React · TypeScript · Vite · SQLite · Ollama
+
+> **Project status:** interview-ready local development project. It uses
+> fictional demonstration data and is **not** a production-ready, multi-user
+> business platform. **Do not enter real or confidential client data** — this
+> is a single-user, loopback-only demo with files stored unencrypted on disk.
+
+## Overview
+
+The application brings business records, documents, and task workflows into one
+workspace. The AI assistant retrieves relevant evidence, answers questions using
+available context, and can **propose** a task for a human to review before the
+task is created. The design keeps the assistant's ability to *read* information
+separate from its ability to *change* business data: no proposed action executes
+without explicit human approval.
+
+The project exercises practical full-stack engineering: REST API design,
+persistent data, document processing, retrieval-augmented generation (RAG),
+authentication, request-protection controls, transactional approval workflows,
+and regression testing.
+
+## Key features
+
+**Business workflows** — manage clients and matters; create and track tasks;
+persist data in SQLite; seed fictional demo data.
+
+**Document intelligence** — upload and validate supported files (`.pdf`, `.txt`)
+with size/type checks and SHA-256 checksums; store uploads under server-generated
+identifier names; extract text from PDFs with page/character limits; chunk
+extracted text for retrieval; summarize documents with a local model.
+
+**Grounded AI assistant** — answer questions from retrieved business and document
+context; combine deterministic keyword/ID retrieval with optional semantic
+similarity search; generate embeddings locally with Ollama `nomic-embed-text`;
+store vectors in SQLite and rank by cosine similarity in Python; fall back to
+keyword retrieval when embeddings are unavailable; build evidence server-side
+(never from model output).
+
+**Human-approved task creation** — the assistant proposes a supported action
+(`create_task` only); the server validates the action and referenced matter and
+rebuilds evidence; proposals are persisted as `pending_approval` with a
+hash-verified payload; execution requires explicit human approval and runs in a
+single transactional step that records an audit event with actor attribution and
+prevents duplicate/replayed approvals.
+
+**Authentication and security** — PBKDF2-HMAC-SHA256 password hashing; opaque
+session tokens stored only as SHA-256 hashes; session expiry and revocation;
+HttpOnly, `SameSite=Lax` session cookie; session-bound CSRF double-submit plus
+origin/Referer validation on unsafe methods; explicit credentialed CORS; in-process
+rate limiting and bounded LLM concurrency; safe document storage paths and
+processing limits; a startup guard enforcing the single-user policy; regression
+tests for authentication and workflow behavior.
 
 ## Layout
 
@@ -25,7 +75,7 @@ files stored unencrypted on disk.
 - `backend/app/approval.py` — Step 5.5 human approval + controlled execution (the only proposal write path).
 - `backend/app/routers/` — `clients.py`, `matters.py`, `tasks.py`, `documents.py`, `ollama.py`, `assistant.py`.
 - `backend/scripts/seed_demo.py` — optional fictional demo data (`.test` emails).
-- `backend/tests/` — 151 tests; each uses an isolated temporary database and storage dir.
+- `backend/tests/` — 342 tests; each uses an isolated temporary database and storage dir.
 - `frontend/` — Vite + React + TypeScript dashboard: Overview, Clients, Tasks, Documents.
 
 ## Requirements
@@ -33,6 +83,50 @@ files stored unencrypted on disk.
 - Python 3.14 with a virtual environment at `backend/.venv`
   (`backend/.venv/bin/pip install -r backend/requirements.txt`)
 - Node.js 20+ with npm (`cd frontend && npm install`)
+- Local [Ollama](https://ollama.com) running with the `qwen3:4b` model and the
+  `nomic-embed-text` embedding model (`ollama pull qwen3:4b`,
+  `ollama pull nomic-embed-text`). Ollama is optional: document upload, listing
+  and keyword retrieval still work when it is unavailable.
+
+## Getting started
+
+Run the backend and frontend in two terminals **from the project root** (the
+directory containing this `README.md`).
+
+**1. Install dependencies**
+
+```bash
+# backend
+python3.14 -m venv backend/.venv
+backend/.venv/bin/pip install -r backend/requirements.txt
+
+# frontend
+cd frontend && npm install && cd ..
+```
+
+**2. Create a login user** (one-time; no default credentials — see
+[Authentication](#authentication-foundation-phase-6-step-62c-1)):
+
+```bash
+backend/.venv/bin/python -m scripts.create_user
+```
+
+**3. Start the backend** (loopback only, http://127.0.0.1:8000):
+
+```bash
+backend/.venv/bin/python -m app.launcher
+```
+
+**4. Start the frontend** (http://localhost:5173):
+
+```bash
+cd frontend
+cp .env.example .env   # first time only
+npm run dev
+```
+
+Open http://localhost:5173 and sign in. Use the paths in the sections below for
+the detailed API contracts, controls, and limitations.
 
 ## Database
 
@@ -77,15 +171,15 @@ cd backend && .venv/bin/python -m scripts.seed_demo
 | `GET /tasks[?matter_id=&status=]` | `200` list | — |
 | `POST /tasks` | `201` created task | `422` invalid body, `404` missing matter |
 | `GET /documents[?matter_id=]` | `200` metadata list | — |
-| `POST /documents` (multipart: `matter_id`, `file`) | `201` metadata | `404` missing matter, `413` too large, `422` invalid/empty/wrong content, `409` duplicate file on same matter |
-| `POST /documents/{id}/extract` | `200` metadata | `404` unknown id |
-| `POST /documents/{id}/summarize` | `200` summary | `404`, `409` not extracted, `503` summarizer unavailable |
+| `POST /documents` (multipart: `matter_id`, `file`) | `201` metadata | `404` missing matter, `413` too large, `422` invalid/empty/wrong content, `409` duplicate file on same matter, `429` document rate limit |
+| `POST /documents/{id}/extract` | `200` metadata | `404` unknown id, `429` document rate limit |
+| `POST /documents/{id}/summarize` | `200` summary | `404`, `409` not extracted, `429` document rate limit or LLM concurrency saturated, `503` summarizer unavailable |
 | `GET /ollama/health` | `200` `{available, models, summary_model, embed_model}` | — (reports `available: false` instead of erroring) |
 | `GET /documents/index` | `200` index status | — |
 | `POST /documents/index` | `200` backfill counts | — (always 200; per-document failures reported honestly) |
 | `POST /documents/{id}/index` | `200` counts | `404` unknown id (non-extracted reported in body) |
-| `POST /assistant/ask` (JSON: `{"question": "..."}`) | `200` answer | `422` blank or >2,000-char question, `503` assistant service unavailable |
-| `POST /assistant/propose-action` (JSON: `{"request": "..."}`) | `200` proposal envelope, persisted as `pending_approval` (no task created) | `422` blank or >2,000-char request, `503` assistant service unavailable |
+| `POST /assistant/ask` (JSON: `{"question": "..."}`) | `200` answer | `422` blank or >2,000-char question, `429` per-user rate limit or LLM concurrency saturated, `503` assistant service unavailable |
+| `POST /assistant/propose-action` (JSON: `{"request": "..."}`) | `200` proposal envelope, persisted as `pending_approval` (no task created) | `422` blank or >2,000-char request, `429` per-user rate limit or LLM concurrency saturated, `503` assistant service unavailable |
 | `GET /assistant/proposals/{proposal_id}` | `200` persisted proposal record | `404` unknown id |
 | `POST /assistant/proposals/{proposal_id}/approve` | `200` decision, creates the task exactly once | `404` unknown id, `409` already decided (dup/concurrent), `422` tampered/invalid payload or missing matter, `503` database busy |
 | `POST /assistant/proposals/{proposal_id}/reject` | `200` decision (`rejected`) | `404` unknown id, `409` already decided, `503` database busy |
@@ -100,7 +194,12 @@ default 180 s). Every request runs the deterministic keyword/explicit-ID
 retrieval from Step 5.2 first (unchanged SQL, unchanged limits). Step 5.3 adds
 an OPTIONAL semantic pass: when the local embedder is reachable and the stored
 index is compatible, extracted document chunks are also ranked by cosine
-similarity and merged in, deduplicated against keyword hits. Extracted text in
+similarity and merged in, deduplicated against keyword hits. **A fresh database
+has no semantic index by default.** Documents are not embedded automatically;
+semantic retrieval only contributes once documents have been indexed via the
+documented `POST /documents/index` workflow (or per-document
+`POST /documents/{id}/index`), so the keyword/ID path is what answers questions
+until then. Extracted text in
 the prompt is wrapped in `<doc_text>` tags and labelled untrusted; user
 questions are untrusted data that cannot override the system instructions. The
 endpoint is read-only — no tools, SQL, shell, or file access, and no actions of
@@ -323,7 +422,7 @@ injection risk but does not eliminate it.
 Terminal 1 — backend on http://127.0.0.1:8000:
 
 ```bash
-cd ~/Desktop/AI-powered\ operating\ system
+# from the project root (the directory containing this README)
 backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload
 ```
 
@@ -354,7 +453,7 @@ opaque server-side tokens of which only the SHA-256 hash is stored.
 Create the first login user (one-time bootstrap; no default credentials):
 
 ```bash
-cd ~/Desktop/AI-powered\ operating\ system
+# from the project root (the directory containing this README)
 backend/.venv/bin/python -m scripts.create_user
 ```
 
@@ -518,10 +617,19 @@ The web app now signs in against the backend session API.
 
 Create a login user before using the app (see the bootstrap instructions above).
 
+The frontend reads the backend base URL from `VITE_API_BASE_URL`, configured in
+`frontend/.env` (copied from `frontend/.env.example`). The documented value is:
+
+```dotenv
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+Set it only if the backend is not reachable at that default address.
+
 Terminal 2 — frontend on http://localhost:5173:
 
 ```bash
-cd ~/Desktop/AI-powered\ operating\ system/frontend
+cd frontend
 cp .env.example .env   # first time only
 npm run dev
 ```
@@ -574,14 +682,14 @@ Notes:
 
 ## Tests
 
-Backend (from this project root; tests use temporary databases and storage
-directories, never `data/`):
+Backend — 342 tests (run from `backend/`; tests use temporary databases and
+storage directories, never `data/`):
 
 ```bash
-backend/.venv/bin/python -m pytest backend -v
+cd backend && .venv/bin/python -m pytest -v
 ```
 
-Frontend (from this project root):
+Frontend — 32 tests across 5 files (run from `frontend/`):
 
 ```bash
 cd frontend && npm test
@@ -589,8 +697,16 @@ cd frontend && npm test
 
 ## Frontend production build
 
+Type-checks, then outputs to `frontend/dist`:
+
 ```bash
-cd frontend && npm run build   # type-checks, then outputs to frontend/dist
+cd frontend && npm run build
+```
+
+Linting (Oxlint):
+
+```bash
+cd frontend && npm run lint
 ```
 
 ## Known limitations (read before using)

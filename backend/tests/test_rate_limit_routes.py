@@ -413,32 +413,56 @@ def test_saturated_gate_blocks_generation(monkeypatch) -> None:
 
 
 def test_concurrent_generation_respects_capacity() -> None:
-    gate = _ConcurrencyGate(1)
-    started = threading.Event()
-    release = threading.Event()
-    in_flight = {"max": 0, "current": 0}
-    lock = threading.Lock()
+    """Capacity 1: two overlapping workers => exactly one acquires, one is rejected.
 
-    def worker():
-        gate.acquire()
-        with lock:
-            in_flight["current"] += 1
-            in_flight["max"] = max(in_flight["max"], in_flight["current"])
-        started.set()
-        release.wait(timeout=2)
-        with lock:
-            in_flight["current"] -= 1
-        gate.release()
+    The second worker is expected to be refused by the non-blocking gate; that
+    ``LLMConcurrencyError`` is the correct behavior and is captured rather than
+    allowed to escape the thread. Every acquired slot is released in ``finally``,
+    and both threads must finish so a leaked slot cannot mask a regression.
+    """
+    gate = _ConcurrencyGate(1)
+    first_acquired = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    acquired = 0
+    rejected = 0
+    in_flight = {"max": 0, "current": 0}
+
+    def worker() -> None:
+        nonlocal acquired, rejected
+        try:
+            gate.acquire()
+        except LLMConcurrencyError:
+            with lock:
+                rejected += 1
+            return
+        try:
+            with lock:
+                acquired += 1
+                in_flight["current"] += 1
+                in_flight["max"] = max(in_flight["max"], in_flight["current"])
+            first_acquired.set()
+            release.wait(timeout=2)
+            with lock:
+                in_flight["current"] -= 1
+        finally:
+            gate.release()
 
     t1 = threading.Thread(target=worker)
     t2 = threading.Thread(target=worker)
     t1.start()
-    started.wait(timeout=2)
+    # Wait until t1 holds the only slot, then start t2 while it is held.
+    assert first_acquired.wait(timeout=2)
     t2.start()
-    # t2 cannot get the slot while t1 holds it.
     release.set()
     t1.join(timeout=2)
     t2.join(timeout=2)
+
+    # Both threads finished (a leaked slot or deadlock would leave one alive).
+    assert not t1.is_alive() and not t2.is_alive()
+    # Exactly one acquisition and one rejection; never two concurrent holders.
+    assert acquired == 1
+    assert rejected == 1
     assert in_flight["max"] == 1
 
 
