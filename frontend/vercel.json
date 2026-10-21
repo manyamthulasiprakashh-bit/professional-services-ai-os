@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://professional-services-ai-os.onrender.com/:path*"
+    }
+  ]
+}
