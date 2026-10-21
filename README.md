@@ -522,22 +522,46 @@ allowed browser origin (see “CSRF” and “Cookies, CORS and HTTPS” below).
 There is still **no role-based authorization and no record ownership**: every
 authenticated user can read and modify every record.
 
-Bootstrap the single login user (one-time; no default credentials):
+Create the single login user (one-time; no default credentials). Two supported
+paths share the same rules:
+
+**Option A — local CLI (needs a shell).**
 
 ```bash
 # from the project root (the directory containing this README)
 backend/.venv/bin/python -m scripts.create_user
 ```
 
-Behavior:
+Prompts for a username (or `--username NAME`) and reads the password from a
+**hidden prompt** — the password is never a command-line argument, never in
+shell history and never printed. The password must be at least 12 characters.
 
-- Prompts for a username (or `--username NAME`) and reads the password from a
-  **hidden prompt** — the password is never a command-line argument, never in
-  shell history and never printed. Password must be at least 12 characters.
+**Option B — environment-driven startup (hosts without a shell).** Set these
+backend-only variables before the service starts:
+
+- `PS_BOOTSTRAP_USERNAME` — the username (not secret).
+- `PS_BOOTSTRAP_PASSWORD_HASH` — **preferred**: the encoded PBKDF2 hash of the
+  password. Generate it locally without exposing the plaintext to the host, then
+  paste the printed hash into the host's environment:
+  ```bash
+  backend/.venv/bin/python -m scripts.create_user --print-hash
+  ```
+- `PS_BOOTSTRAP_PASSWORD` — fallback only, read when no hash is set. Prefer the
+  hash so the plaintext password never lives in the hosting environment.
+
+At startup the backend creates the account **only when the database has zero
+users**, and only then runs the single-user guard. If any account already
+exists, configured bootstrap is a no-op and **never overwrites or rotates** it.
+Partial or invalid configuration fails startup closed. The username, password,
+hash and other secrets are never logged.
+
+Behavior common to both paths:
+
 - There is **no hardcoded default username or password** and no committed
-  credentials; users are **never** created automatically at application startup.
+  credentials. `scripts.create_user` never creates a user without input; the
+  startup path never creates one unless `PS_BOOTSTRAP_*` is configured.
 - Refuses to overwrite an existing user. To deliberately replace a password,
-  re-run with `--rotate`.
+  re-run the CLI with `--rotate` (the startup path never rotates).
 - Refuses to create a **second distinct account**: this is a single-user demo
   (see "Single-user policy" below).
 - Optional `--role user|approver` (default `user`) is a reserved label that is
@@ -555,12 +579,14 @@ This is a **single-user demo** (local or single-instance hosted). The intended
 runtime policy permits **at most one active account**. This is enforced, not
 merely a convention:
 
-- **Bootstrap (`scripts.create_user`).** Creating the **first** account works as
-  before. Rotating the existing account's password with `--rotate` works as
-  before. Attempting to create a **second distinct account is refused** with a
+- **Bootstrap (`scripts.create_user` and `PS_BOOTSTRAP_*`).** Creating the
+  **first** account works as before. Rotating the existing account's password
+  with `--rotate` works as before. The environment-driven startup bootstrap only
+  ever creates a user when **zero** users exist and never overwrites an existing
+  account. Attempting to create a **second distinct account is refused** with a
   clear error that never contains a password or hash. The refusal is enforced by
   the backend bootstrap logic, not by the frontend.
-- **Runtime startup guard.** At application startup the backend inspects the
+- **Runtime startup guard.** Bootstrap runs first, then the backend inspects the
   configured database (read-only) and **fails closed** if **more than one
   active account** exists, with a clear, non-sensitive error explaining how an
   operator can resolve it. **Zero** accounts is allowed so first-time setup can
@@ -815,6 +841,18 @@ the database and the documents directory, and backups must include both
 (including SQLite `-wal`/`-shm` or after a checkpoint). A disk also prevents
 zero-downtime deploys and cannot be shared by multiple instances.
 
+**Render free tier loses all data.** A free web service has **no persistent
+disk**, and its filesystem (including SQLite and uploads) is reset on every
+redeploy, restart and idle spin-down. On the free tier, expect the account,
+sessions, clients, matters, tasks and documents to disappear. Do not point
+`PS_APP_DB`/`PS_DOCS_DIR` at `/var/data` (that requires a paid disk); leave the
+default paths so the app can write to its ephemeral filesystem. The
+environment-driven bootstrap (`PS_BOOTSTRAP_*` below) recreates the login
+account on each boot, so a login keeps working after a reset — but all business
+data is still lost. For durable data on Render, use a paid persistent disk or an
+external database, or run the demo locally. Never store real client data on the
+free tier.
+
 **Authentication across origins.** Deploy the API on the same origin as the
 frontend (for example a Vercel rewrite from `/api/*` to the Render service) and
 build the frontend with `VITE_API_BASE_URL=/api`. A direct cross-site
@@ -825,15 +863,22 @@ be present in `PS_ALLOWED_ORIGINS`. The frontend refuses to fall back to
 `http://127.0.0.1:8000` in a production build when `VITE_API_BASE_URL` is
 missing.
 
-**Single-user bootstrap.** After the service starts, create the one account on
-Render Shell:
+**Single-user bootstrap.** On a host with a shell (including a paid Render
+instance), create the one account interactively:
 
 ```bash
 cd backend && python -m scripts.create_user --username <name>
 ```
 
-The password is entered at a hidden prompt. Startup fails closed if more than
-one active account exists; the demo does not support multi-user operation.
+On a host **without** a shell (for example the Render free tier), set
+`PS_BOOTSTRAP_USERNAME` plus the preferred `PS_BOOTSTRAP_PASSWORD_HASH` (generate
+it locally with `scripts.create_user --print-hash`) as backend-only environment
+variables. At startup the backend creates the account only when the database has
+zero users, then runs the single-user guard. It never overwrites an existing
+account, and startup fails closed if more than one active account exists; the
+demo does not support multi-user operation. On the free tier this bootstrap
+re-runs after each data reset, so a login is always available even though
+business data is not.
 
 **AI generation is local Ollama by default; hosted OpenRouter is optional.** A
 hosted backend cannot reach Ollama on `127.0.0.1`. Without a reachable generation

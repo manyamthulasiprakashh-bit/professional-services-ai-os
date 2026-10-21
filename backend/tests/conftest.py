@@ -41,6 +41,9 @@ def _clear_llm_provider_env(monkeypatch) -> None:
         "OLLAMA_EMBED_TIMEOUT",
         "OLLAMA_NUM_PREDICT",
         "OLLAMA_NUM_CTX",
+        "PS_BOOTSTRAP_USERNAME",
+        "PS_BOOTSTRAP_PASSWORD",
+        "PS_BOOTSTRAP_PASSWORD_HASH",
     ):
         monkeypatch.delenv(name, raising=False)
 

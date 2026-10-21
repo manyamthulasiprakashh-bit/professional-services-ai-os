@@ -87,31 +87,53 @@ def hash_password(password: str, *, iterations: int | None = None) -> str:
     return f"{HASH_PREFIX}${work_factor}${salt.hex()}${derived.hex()}"
 
 
+def parse_password_hash(encoded: str) -> tuple[int, bytes, bytes] | None:
+    """Parse a stored PBKDF2 string into (iterations, salt, expected).
+
+    Returns None for anything that is not a well-formed encoded hash. Never
+    logs the input, which is a credential-equivalent value.
+    """
+    if not isinstance(encoded, str):
+        return None
+    parts = encoded.split("$")
+    if len(parts) != 4 or parts[0] != HASH_PREFIX:
+        return None
+    _, iterations_str, salt_hex, hash_hex = parts
+    try:
+        iterations = int(iterations_str)
+    except ValueError:
+        return None
+    if iterations <= 0:
+        return None
+    try:
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(hash_hex)
+    except ValueError:
+        return None
+    if not salt or not expected:
+        return None
+    return iterations, salt, expected
+
+
+def validate_password_hash(encoded: str) -> str:
+    """Return the encoded hash or raise ValueError. Never logs the value."""
+    if parse_password_hash(encoded) is None:
+        raise ValueError("password hash is not a valid PBKDF2 encoded hash")
+    return encoded
+
+
 def verify_password(password: str, encoded: str) -> bool:
     """Verify a password against a stored hash. False on any malformed input.
 
     Never raises and never logs; a corrupt or unknown-format stored hash simply
     fails verification (fail closed).
     """
-    if not isinstance(password, str) or not isinstance(encoded, str):
+    if not isinstance(password, str):
         return False
-    parts = encoded.split("$")
-    if len(parts) != 4 or parts[0] != HASH_PREFIX:
+    parsed = parse_password_hash(encoded)
+    if parsed is None:
         return False
-    _, iterations_str, salt_hex, hash_hex = parts
-    try:
-        iterations = int(iterations_str)
-    except ValueError:
-        return False
-    if iterations <= 0:
-        return False
-    try:
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(hash_hex)
-    except ValueError:
-        return False
-    if not salt or not expected:
-        return False
+    iterations, salt, expected = parsed
     derived = hashlib.pbkdf2_hmac(
         PBKDF2_ALGORITHM, password.encode("utf-8"), salt, iterations, len(expected)
     )
@@ -140,6 +162,30 @@ def create_user(
         "INSERT INTO users (username, password_hash, role, is_active, created_at)"
         " VALUES (?, ?, ?, ?, ?)",
         (cleaned, encoded, role, 1 if is_active else 0, _iso(_utc_now())),
+    )
+    return get_user_by_id(conn, cur.lastrowid)
+
+
+def create_user_with_hash(
+    conn: sqlite3.Connection,
+    *,
+    username: str,
+    password_hash: str,
+    role: str = "user",
+    is_active: bool = True,
+) -> sqlite3.Row:
+    """Insert a new user from a pre-computed, validated PBKDF2 hash.
+
+    Used by environment-driven bootstrap so the plaintext password does not have
+    to be configured. The hash must already be in the exact format produced by
+    ``hash_password``; otherwise ValueError is raised. Never logs the hash.
+    """
+    cleaned = validate_username(username)
+    validate_password_hash(password_hash)
+    cur = conn.execute(
+        "INSERT INTO users (username, password_hash, role, is_active, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (cleaned, password_hash, role, 1 if is_active else 0, _iso(_utc_now())),
     )
     return get_user_by_id(conn, cur.lastrowid)
 

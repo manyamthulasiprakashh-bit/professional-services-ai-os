@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import auth as auth_module
+from .bootstrap import bootstrap_from_env
 from .db import connect, resolve_db_path
 from .llm import validate_llm_configuration
 from .routers import assistant, auth, clients, documents, matters, ollama, tasks
@@ -26,12 +27,15 @@ async def lifespan(_app: FastAPI):
     """Enforce the single-user demo policy at startup.
 
     Opens the configured database (applying the idempotent schema, which never
-    mutates data) and fails closed if more than one active account exists. Zero
-    accounts is allowed so first-time setup can still bootstrap a user.
+    mutates data). First, if ``PS_BOOTSTRAP_*`` is configured, creates the
+    initial account when the database has zero users (never overwriting an
+    existing account). Then fails closed if more than one active account exists.
+    Zero accounts remains allowed when no bootstrap configuration is present.
     """
     validate_llm_configuration()
     conn = connect(resolve_db_path())
     try:
+        bootstrap_from_env(conn)
         auth_module.verify_single_user_policy(conn)
     finally:
         conn.close()

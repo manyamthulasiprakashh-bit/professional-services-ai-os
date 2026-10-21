@@ -1,9 +1,15 @@
-"""One-time user bootstrap / rotation CLI (Step 6.2C-1).
+"""One-time user bootstrap / rotation CLI.
 
-Creates the first login user with an operator-supplied username and an
-interactively entered password. There is NO hardcoded default username or
-password, and no committed credentials. The script never prints the password
-or its hash, and it never creates a user automatically at application startup.
+There are two supported ways to create the first login user:
+
+1. This interactive CLI (local development, or a host with a shell).
+2. Environment-driven startup bootstrap for hosts without a shell (see
+   ``PS_BOOTSTRAP_*`` in ``app.bootstrap`` and the README deployment section).
+
+Both share the same rules in ``app.bootstrap``: no hardcoded default username
+or password, no committed credentials, users are never created automatically
+without configuration, an existing user is never overwritten, and at most one
+account is permitted.
 
 Run from the project root:
 
@@ -13,6 +19,10 @@ The username is prompted (or passed with ``--username``; usernames are not
 secret). The password is read with a hidden prompt so it does not appear in the
 process listing or shell history — do NOT pass the password as a command-line
 argument.
+
+To produce the value for ``PS_BOOTSTRAP_PASSWORD_HASH`` without storing the
+plaintext password, use ``--print-hash``: it reads a hidden password and prints
+only the encoded PBKDF2 hash.
 
 An existing user is never overwritten: re-running for a taken username fails
 unless ``--rotate`` is given deliberately, which replaces only that user's
@@ -24,11 +34,10 @@ import getpass
 import sys
 
 from app import auth
+from app.bootstrap import BootstrapError, bootstrap_user
 from app.db import db_session
 
-
-class BootstrapError(Exception):
-    """A safe, user-facing bootstrap failure (never contains secrets)."""
+__all__ = ["BootstrapError", "bootstrap_user", "main"]
 
 
 def _prompt_password() -> str:
@@ -37,69 +46,6 @@ def _prompt_password() -> str:
     if password != confirm:
         raise BootstrapError("Passwords did not match.")
     return password
-
-
-def bootstrap_user(
-    conn,
-    *,
-    username: str,
-    password: str,
-    role: str = "user",
-    rotate: bool = False,
-) -> str:
-    """Create (or deliberately rotate) the single demo user.
-
-    Strict single-user policy: this demo permits at most ONE account. Creating
-    the first account works as before; rotating the password of the existing
-    account works with ``rotate=True``; creating a *second distinct* account is
-    refused by default. Existing databases that already contain more than one
-    account are never modified or cleaned up — the caller is told to resolve it
-    manually.
-
-    Raises BootstrapError for validation problems, an already-taken username
-    without ``rotate``, or an attempt to add a second account. Never logs or
-    returns the password, and never surfaces secrets in messages.
-    """
-    try:
-        cleaned = auth.validate_username(username)
-        auth.validate_password(password)
-    except ValueError as exc:
-        raise BootstrapError(str(exc)) from exc
-
-    existing = auth.get_user_by_username(conn, cleaned)
-    if existing is not None:
-        # Same account. Overwrite only when explicitly rotating.
-        if not rotate:
-            raise BootstrapError(
-                f"User '{cleaned}' already exists. Refusing to overwrite; "
-                "use --rotate to deliberately replace its password."
-            )
-        encoded = auth.hash_password(password)
-        conn.execute(
-            "UPDATE users SET password_hash = ?, role = ?, is_active = 1 WHERE id = ?",
-            (encoded, role, existing["id"]),
-        )
-        return cleaned
-
-    # The username is new: this would be an additional account.
-    total = auth.count_users(conn)
-    if total > 0:
-        if total > 1:
-            raise BootstrapError(
-                "This database already contains multiple user accounts, which "
-                "the single-user demo does not support. Refusing to add another. "
-                "Resolve the extra accounts manually (inspect the 'users' table) "
-                "before bootstrapping; nothing was changed."
-            )
-        raise BootstrapError(
-            "This demo permits only one user account and one already exists. "
-            "Refusing to create a second account. To replace the existing "
-            "account's password, re-run with --rotate and that account's "
-            "username; nothing was changed."
-        )
-
-    auth.create_user(conn, username=cleaned, password=password, role=role)
-    return cleaned
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,7 +71,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Deliberately replace the password of an existing user.",
     )
+    parser.add_argument(
+        "--print-hash",
+        dest="print_hash",
+        action="store_true",
+        help=(
+            "Read a password from a hidden prompt and print only its PBKDF2 "
+            "hash (for PS_BOOTSTRAP_PASSWORD_HASH), then exit. Does not touch "
+            "the database."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.print_hash:
+        try:
+            password = _prompt_password()
+        except BootstrapError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("\nAborted.", file=sys.stderr)
+            return 1
+        print(auth.hash_password(password))
+        return 0
 
     username = args.username or input("Username: ").strip()
     try:
