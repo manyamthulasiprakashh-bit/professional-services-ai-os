@@ -212,6 +212,11 @@ def _merge_semantic_chunks(
     from . import embeddings  # local import avoids a circular import at module load
 
     try:
+        if not embeddings.has_index(conn):
+            # Nothing to rank semantically: skip the provider call entirely.
+            # Keyword/ID retrieval above is unaffected.
+            result.semantic_skipped_reason = "index_empty"
+            return
         if embeddings.is_stale(conn, embedder):
             result.semantic_skipped_reason = "index_stale"
             return

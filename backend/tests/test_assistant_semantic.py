@@ -210,3 +210,58 @@ def test_single_document_index_endpoint(client, conn) -> None:
         _clear()
     assert response.status_code == 200
     assert response.json()["indexed"] >= 1
+
+
+# --- empty-index fast path --------------------------------------------------
+
+
+def _propose(client, request: str, assistant, embedder):
+    from app.main import app
+    from app.routers import assistant as assistant_router
+
+    app.dependency_overrides[assistant_router.get_assistant] = lambda: assistant
+    app.dependency_overrides[assistant_router.get_embedder] = lambda: embedder
+    try:
+        return client.post("/assistant/propose-action", json={"request": request})
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ask_empty_index_skips_query_embedding(client) -> None:
+    embedder = FakeEmbedder()
+    response = _ask(client, "Acme Legal Harbor", FakeAssistant(), embedder)
+
+    assert response.status_code == 200
+    assert embedder.calls == []
+
+
+def test_ask_populated_index_embeds_query_once(client, conn) -> None:
+    embedder = FakeEmbedder()
+    _seed(client, embedder)
+    before = len(embedder.calls)
+
+    response = _ask(client, "Acme Legal Harbor", FakeAssistant(), embedder)
+
+    assert response.status_code == 200
+    assert len(embedder.calls) == before + 1
+
+
+def test_propose_empty_index_skips_query_embedding(client) -> None:
+    embedder = FakeEmbedder()
+    response = _propose(client, "add a task", FakeAssistant("not json"), embedder)
+
+    assert response.status_code == 200
+    assert embedder.calls == []
+
+
+def test_propose_populated_index_embeds_query_once(client, conn) -> None:
+    embedder = FakeEmbedder()
+    _seed(client, embedder)
+    before = len(embedder.calls)
+
+    response = _propose(
+        client, "add a task for Harbor", FakeAssistant("not json"), embedder
+    )
+
+    assert response.status_code == 200
+    assert len(embedder.calls) == before + 1

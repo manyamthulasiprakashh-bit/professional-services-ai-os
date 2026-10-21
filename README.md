@@ -6,11 +6,14 @@ and a human-approved AI assistant. Independent prototype; it is **not** a
 Stanford Innovations product.
 
 **Built with:** Python · FastAPI · React · TypeScript · Vite · SQLite · Ollama
+(local embeddings/default generation) · optional OpenRouter (hosted generation)
 
 > **Project status:** interview-ready local development project. It uses
 > fictional demonstration data and is **not** a production-ready, multi-user
 > business platform. **Do not enter real or confidential client data** — this
-> is a single-user, loopback-only demo with files stored unencrypted on disk.
+> is a single-user demo with files stored unencrypted on disk. Local
+> development binds to loopback; hosting requirements are documented under
+> [Deployment](#deployment-vercel--render).
 
 ## Overview
 
@@ -34,7 +37,8 @@ persist data in SQLite; seed fictional demo data.
 **Document intelligence** — upload and validate supported files (`.pdf`, `.txt`)
 with size/type checks and SHA-256 checksums; store uploads under server-generated
 identifier names; extract text from PDFs with page/character limits; chunk
-extracted text for retrieval; summarize documents with a local model.
+extracted text for retrieval; summarize documents with the configured provider
+(local Ollama by default, or optional hosted OpenRouter).
 
 **Grounded AI assistant** — answer questions from retrieved business and document
 context; combine deterministic keyword/ID retrieval with optional semantic
@@ -67,7 +71,7 @@ tests for authentication and workflow behavior.
 - `backend/app/schemas.py` — Pydantic request/response models.
 - `backend/app/documents_storage.py` — upload limits, content sniffing, UUID storage names.
 - `backend/app/extraction.py` — PDF/plain-text extraction (pypdf); honest failures, no OCR.
-- `backend/app/llm.py` — provider abstractions (`Summarizer`, `Assistant`, `Embedder`) + local Ollama implementations.
+- `backend/app/llm.py` — provider abstractions (`Summarizer`, `Assistant`, `Embedder`) + local Ollama implementations and optional OpenRouter generation.
 - `backend/app/retrieval.py` — keyword/ID retrieval plus optional hybrid semantic merge for the assistant.
 - `backend/app/embeddings.py` — chunk-embedding persistence (SQLite BLOBs) and bounded cosine ranking.
 - `backend/app/assistant_service.py` — retrieval → prompt composition → provider → server-built evidence.
@@ -75,18 +79,28 @@ tests for authentication and workflow behavior.
 - `backend/app/approval.py` — Step 5.5 human approval + controlled execution (the only proposal write path).
 - `backend/app/routers/` — `clients.py`, `matters.py`, `tasks.py`, `documents.py`, `ollama.py`, `assistant.py`.
 - `backend/scripts/seed_demo.py` — optional fictional demo data (`.test` emails).
-- `backend/tests/` — 342 tests; each uses an isolated temporary database and storage dir.
+- `backend/tests/` — isolated test suite; each test uses a temporary database and storage dir.
 - `frontend/` — Vite + React + TypeScript dashboard: Overview, Clients, Tasks, Documents.
 
 ## Requirements
 
-- Python 3.14 with a virtual environment at `backend/.venv`
-  (`backend/.venv/bin/pip install -r backend/requirements.txt`)
-- Node.js 20+ with npm (`cd frontend && npm install`)
+- Python **3.13.x** recommended for deployment and **3.14.6** tested locally.
+  Minimum is **3.11** (`starlette==1.9.0` requires it). All pinned runtime
+  dependencies declare Python 3.11+ support, and the suite passes on 3.14.6
+  locally. `uvloop==0.23.0` (via `uvicorn[standard]`) lists support through
+  3.13, so 3.13 is the conservative hosted choice. Local setup uses a virtual
+  environment at `backend/.venv`.
+  - Runtime: `backend/.venv/bin/pip install -r backend/requirements.txt`
+  - Development/tests: `backend/.venv/bin/pip install -r backend/requirements-dev.txt`
+- Node.js 22 LTS or newer with npm (`cd frontend && npm install`)
 - Local [Ollama](https://ollama.com) running with the `qwen3:4b` model and the
   `nomic-embed-text` embedding model (`ollama pull qwen3:4b`,
-  `ollama pull nomic-embed-text`). Ollama is optional: document upload, listing
-  and keyword retrieval still work when it is unavailable.
+  `ollama pull nomic-embed-text`). Ollama is the default generation and
+  embedding provider. Document upload, listing and keyword retrieval still work
+  when it is unavailable. A hosted backend cannot reach local Ollama, so hosted
+  generation may use OpenRouter instead; embeddings remain local and must be
+  indexed where Ollama is reachable. See [AI provider configuration](#ai-provider-configuration)
+  and [Deployment](#deployment-vercel--render).
 
 ## Getting started
 
@@ -96,9 +110,9 @@ directory containing this `README.md`).
 **1. Install dependencies**
 
 ```bash
-# backend
+# backend (development + tests)
 python3.14 -m venv backend/.venv
-backend/.venv/bin/pip install -r backend/requirements.txt
+backend/.venv/bin/pip install -r backend/requirements-dev.txt
 
 # frontend
 cd frontend && npm install && cd ..
@@ -117,7 +131,7 @@ backend/.venv/bin/python -m scripts.create_user
 backend/.venv/bin/python -m app.launcher
 ```
 
-**4. Start the frontend** (http://localhost:5173):
+**4. Start the frontend** (http://127.0.0.1:5173):
 
 ```bash
 cd frontend
@@ -125,7 +139,7 @@ cp .env.example .env   # first time only
 npm run dev
 ```
 
-Open http://localhost:5173 and sign in. Use the paths in the sections below for
+Open http://127.0.0.1:5173 and sign in. Use the paths in the sections below for
 the detailed API contracts, controls, and limitations.
 
 ## Database
@@ -186,11 +200,51 @@ cd backend && .venv/bin/python -m scripts.seed_demo
 
 Interactive docs: `GET http://127.0.0.1:8000/docs`.
 
+## AI provider configuration
+
+Generation provider selection is explicit and backend-only:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PS_LLM_PROVIDER` | `ollama` | `ollama` preserves the existing local behavior; `openrouter` uses hosted generation. Other values fail startup. |
+| `OPENROUTER_API_KEY` | — | Required when `PS_LLM_PROVIDER=openrouter`. Send it only through the backend environment; never put it in a `VITE_*` variable, frontend code, URL or Git. |
+| `OPENROUTER_MODEL` | — | Required model identifier. It must currently be available to your OpenRouter account; this repository does not pin or guarantee a particular model. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter-compatible API base. HTTPS is required outside loopback (plain HTTP is allowed only for local tests). |
+| `OPENROUTER_TIMEOUT` | `180` | Request timeout in seconds, bounded to 1–600. |
+
+`PS_LLM_PROVIDER=openrouter` affects **document summarization and assistant
+generation only**. Embeddings continue to use the existing local Ollama
+`Embedder` (`OLLAMA_EMBED_MODEL` via `OLLAMA_URL`); they are not sent to
+OpenRouter. If a hosted backend cannot reach Ollama for embeddings, semantic
+retrieval is skipped and the keyword/ID path still works (with no embeddings
+indexed, that is the normal path). Keyword fallback is preserved exactly.
+
+OpenRouter is used through an OpenAI-compatible `POST /chat/completions` call
+with the same server-composed prompts, 256-token output cap, temperature `0.2`,
+and single concurrency gate. The key is sent only in the
+`Authorization: Bearer` header and is never returned, logged or included in
+errors. There is **no automatic fallback** between providers: provider failures
+return the existing safe `503`; a saturated local concurrency gate still returns
+`429`.
+
+OpenRouter model availability, free-model offers, rate limits, pricing and
+service terms can change at any time. Do not assume a model is free or
+permanently available; check your account and OpenRouter's current terms.
+Hosted inference sends the relevant prompt and retrieved context (which may
+include uploaded document text) to the selected external provider. Use
+fictional demo data unless data-handling terms have been reviewed. AI endpoints
+still require a configured, reachable provider; without one they return `503`.
+`GET /ollama/health` remains a local Ollama/embedding health check; it does not
+probe OpenRouter.
+
 ## AI assistant (Step 5.3 — hybrid keyword + semantic retrieval)
 
-`POST /assistant/ask` answers questions with the local model
-(`OLLAMA_ASSISTANT_MODEL`, default `qwen3:4b`; `OLLAMA_ASSISTANT_TIMEOUT`,
-default 180 s). Every request runs the deterministic keyword/explicit-ID
+`POST /assistant/ask` answers questions with the configured generation provider:
+local Ollama by default (`OLLAMA_ASSISTANT_MODEL`, default `qwen3:4b`;
+`OLLAMA_ASSISTANT_TIMEOUT`, default 180 s), or OpenRouter when
+`PS_LLM_PROVIDER=openrouter` (see
+[AI provider configuration](#ai-provider-configuration)). Every request runs the
+deterministic keyword/explicit-ID
 retrieval from Step 5.2 first (unchanged SQL, unchanged limits). Step 5.3 adds
 an OPTIONAL semantic pass: when the local embedder is reachable and the stored
 index is compatible, extracted document chunks are also ranked by cosine
@@ -205,6 +259,17 @@ questions are untrusted data that cannot override the system instructions. The
 endpoint is read-only — no tools, SQL, shell, or file access, and no actions of
 any kind.
 
+**Bounded generation.** Ollama assistant and summarization calls set
+`OLLAMA_NUM_PREDICT` (default **256** output tokens) and `OLLAMA_NUM_CTX`
+(default **4096** context tokens). Both are read at request time, so tests and
+operators can override them without a code change; invalid or non-positive
+values fall back to the defaults. OpenRouter calls use the same
+`OLLAMA_NUM_PREDICT` value as `max_tokens` and `OPENROUTER_TIMEOUT` for the
+request timeout. Retrieval is bounded well below the context window (evidence
+≤ 6,000 chars, question ≤ 2,000 chars), and summarization caps document text at
+6,000 chars. When the semantic index is empty, the per-question query-embedding
+call is skipped entirely — keyword/ID retrieval is unchanged.
+
 **Evidence is server-side, never model-generated.** Every entry in `evidence`
 points at an actual retrieved record with a stable ID (client/matter/task id,
 document id and page when present), and `evidence_sufficient` is `true` only
@@ -216,8 +281,8 @@ the answer sounds.
 - Chunk embeddings use local Ollama `nomic-embed-text`
   (`OLLAMA_EMBED_MODEL`, `OLLAMA_EMBED_TIMEOUT` default 60 s; `OLLAMA_URL`
   reused). Vectors are stored as float32 BLOBs in `chunk_embeddings` with
-  `document_id`, `dimension`, `embed_model` and `created_at`. No external or
-  paid providers are used.
+  `document_id`, `dimension`, `embed_model` and `created_at`. Embeddings are
+  separate from generation and are **never sent to OpenRouter**.
 - **Indexing is best-effort at upload/re-extract and never fails those
   operations:** if the embedder is down, the document stays retrievable by
   keyword and can be indexed later. There is **no automatic full-corpus
@@ -409,13 +474,16 @@ injection risk but does not eliminate it.
   PDFs, UTF-8/no-NUL for text). Identical file content on the same matter → 409.
 - Extraction is synchronous. Scanned/image-only PDFs get
   `status=extraction_failed` with an explicit reason — **no OCR** in this phase.
-- Summarization uses local Ollama only (`OLLAMA_URL`, default
-  `http://127.0.0.1:11434`; `OLLAMA_SUMMARY_MODEL`, default `qwen3:4b`;
-  `OLLAMA_SUMMARY_TIMEOUT`, default 180 s). The API response keeps machine-extracted
-  source excerpts (`source_excerpts`) separate from model output (`summary`,
-  `key_points`), flags both as `machine_generated`/`review_required`, and treats
-  document text as untrusted data in the prompt. If Ollama is down, the endpoint
-  returns 503 with a clear error — never a fabricated summary.
+- Summarization uses the configured generation provider. The default is local
+  Ollama (`OLLAMA_URL`, default `http://127.0.0.1:11434`;
+  `OLLAMA_SUMMARY_MODEL`, default `qwen3:4b`; `OLLAMA_SUMMARY_TIMEOUT`, default
+  180 s); hosted generation uses OpenRouter when `PS_LLM_PROVIDER=openrouter`
+  (see [AI provider configuration](#ai-provider-configuration)). The API response
+  keeps machine-extracted source excerpts (`source_excerpts`) separate from model
+  output (`summary`, `key_points`), flags both as
+  `machine_generated`/`review_required`, and treats document text as untrusted
+  data in the prompt. If the configured provider is down, the endpoint returns
+  503 with a clear error — never a fabricated summary.
 
 ## Running — two terminals, from this project root
 
@@ -426,31 +494,35 @@ Terminal 1 — backend on http://127.0.0.1:8000:
 backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload
 ```
 
-The `--host 127.0.0.1` is deliberate: the backend binds to loopback only. A
+The `--host 127.0.0.1` is deliberate **for local development**: the current
+launcher binds to loopback only and has no external-binding switch. A
 maintained launcher with the same enforced default is also available:
 
 ```bash
 backend/.venv/bin/python -m app.launcher
 ```
 
-Both pin the bind host to `127.0.0.1` and there is **no configurable
-external-binding default**. Binding to a non-loopback address (`--host
-0.0.0.0`, a LAN IP, etc.) exposes an API that has **no authentication or
-authorization** — every client, matter, task, document, proposal and approval
-endpoint becomes reachable by anyone who can route to the port, and "approval"
-would record intent without any identity. Do not enable non-loopback exposure
-until authentication, authorization and deployment controls (TLS, a trusted
-reverse proxy, rate limiting) are in place.
+Local development should stay on `127.0.0.1`. A hosted deployment must bind to
+`0.0.0.0` behind the platform's TLS-terminating proxy and must configure exact
+allowed origins, Secure cookies, persistent storage and one instance; see
+[Deployment](#deployment-vercel--render). Authentication, CSRF, rate limiting
+and the single-user startup guard are already enforced, but this remains a
+**single-user** application with no ownership/tenant isolation. Public
+`/docs`, `/redoc` and `/openapi.json` remain exposed by design.
 
-## Authentication foundation (Phase 6, Step 6.2C-1)
+## Authentication (Phase 6, Steps 6.2C-1–6.2C-3)
 
-This step added the **backend authentication foundation only**. It does **not**
-yet protect any route, add a login page, or enforce authorization: this is
-**not** end-to-end authentication. Passwords are hashed with PBKDF2-HMAC-SHA256
-(unique salt per password, 600,000 iterations by default), and sessions are
-opaque server-side tokens of which only the SHA-256 hash is stored.
+Authentication is **implemented end to end**: the backend protects every
+business, document and assistant route, and the frontend provides a login
+screen, session restore (`GET /auth/me`) and sign-out. Passwords are hashed with
+PBKDF2-HMAC-SHA256 (unique salt per password, 600,000 iterations by default);
+sessions are opaque server-side tokens of which only the SHA-256 hash is stored.
+State-changing requests also require the session-bound CSRF token and an
+allowed browser origin (see “CSRF” and “Cookies, CORS and HTTPS” below).
+There is still **no role-based authorization and no record ownership**: every
+authenticated user can read and modify every record.
 
-Create the first login user (one-time bootstrap; no default credentials):
+Bootstrap the single login user (one-time; no default credentials):
 
 ```bash
 # from the project root (the directory containing this README)
@@ -479,9 +551,9 @@ revoked sessions — they never fall back to anonymous access.
 
 ## Single-user policy (Phase 7, Step 7.1B)
 
-This is a **single-user, loopback-only local demo**. The intended runtime policy
-permits **at most one active account**. This is enforced, not merely a
-convention:
+This is a **single-user demo** (local or single-instance hosted). The intended
+runtime policy permits **at most one active account**. This is enforced, not
+merely a convention:
 
 - **Bootstrap (`scripts.create_user`).** Creating the **first** account works as
   before. Rotating the existing account's password with `--rotate` works as
@@ -505,9 +577,11 @@ The `role` field is **reserved** and is **not** an authorization boundary.
 Records (clients, matters, tasks, documents, retrieval results, proposals) are
 **not** owner-scoped or tenant-isolated: any authenticated user can see and act
 on all of them. The public `/docs`, `/redoc` and `/openapi.json` policy is
-**unchanged**. This demo is **not** safe to expose to other machines or to use
-as a multi-user service without further work (ownership columns and a
-role-based permission matrix are explicitly out of scope for this step).
+**unchanged**. This demo is **not** safe to expose as a multi-user service or
+to store real client data without further work (ownership columns and a
+role-based permission matrix are explicitly out of scope). Hosting guidance
+(HTTPS, exact origins, Secure cookies, persistent storage) is under
+[Deployment](#deployment-vercel--render).
 
 ## Login, sessions and route enforcement (Phase 6, Step 6.2C-2)
 
@@ -547,21 +621,31 @@ must send the session-bound CSRF token in the `X-CSRF-Token` header, matching th
 `ps_csrf` cookie (a synchroniser/double-submit token whose hash is stored on the
 session row). Missing or mismatched tokens get `403`. CORS and `SameSite` are
 **not** treated as sufficient by themselves. When a browser supplies an
-`Origin`/`Referer`, it must match one of the allowed dev origins.
+`Origin`/`Referer`, it must match one of the configured exact origins
+(`PS_ALLOWED_ORIGINS`; localhost defaults for development).
 
-**Cookies, CORS and local HTTP**
+**Cookies, CORS and HTTPS**
 
 - Cookies: `HttpOnly` on the session cookie; `SameSite=Lax`; `Secure` is set
-  **only** when `PS_AUTH_COOKIE_SECURE` is explicitly enabled. For local HTTP
-  development (loopback) cookies are intentionally non-Secure so login works
-  over `http://127.0.0.1:8000`. Never infer HTTPS from `X-Forwarded-Proto`.
-- CORS: credentialed CORS (`allow_credentials=True`) is enabled for the exact
-  existing dev origins only — never a wildcard. The frontend will use
-  `credentials: "include"` (wired in the next substep).
-- The launcher remains loopback-only.
-
-This step added **backend** authentication only: there is **no frontend login UI
-yet**, and this is **not** complete end-to-end authentication.
+  **only** when `PS_AUTH_COOKIE_SECURE` is explicitly enabled. Local HTTP
+  development (loopback) keeps cookies non-Secure so login works over
+  `http://127.0.0.1:8000`; **production must set
+  `PS_AUTH_COOKIE_SECURE=true`**. Never infer HTTPS from `X-Forwarded-Proto`.
+- CORS: credentialed CORS (`allow_credentials=True`) is enabled for exact
+  origins only — never a wildcard. `PS_ALLOWED_ORIGINS` is a comma-separated
+  allowlist shared by CORS and the CSRF origin check; it trims whitespace and
+  trailing slashes, normalises scheme/host, and rejects wildcards, paths,
+  queries, userinfo and malformed ports at startup. When unset, the localhost
+  development origins are used.
+- The launcher remains loopback-only for local use. Hosted deployments use the
+  Render start command documented below.
+- Cross-origin deployment note: `ps_session` is an HttpOnly host-only cookie and
+  the frontend reads the rotated `ps_csrf` cookie from `document.cookie`. A
+  frontend on a different site from the API cannot read that cookie and
+  `SameSite=Lax` cookies are not sent on cross-site fetches. Use a same-origin
+  proxy (for example a Vercel rewrite of `/api/*` to the Render service) so
+  cookies and CSRF stay first-party. Do not weaken `SameSite` or CSRF to work
+  around this.
 
 ## Approval accountability (Phase 6, Step 6.2C-3)
 
@@ -626,7 +710,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000
 
 Set it only if the backend is not reachable at that default address.
 
-Terminal 2 — frontend on http://localhost:5173:
+Terminal 2 — frontend on http://127.0.0.1:5173:
 
 ```bash
 cd frontend
@@ -634,11 +718,11 @@ cp .env.example .env   # first time only
 npm run dev
 ```
 
-Open http://localhost:5173 — you are shown the sign-in screen; after signing in,
+Open http://127.0.0.1:5173 — you are shown the sign-in screen; after signing in,
 the Clients page creates and lists clients via the API; the Tasks page shows each
 task's status, priority and matter; the Documents page uploads PDF/text files
-against a matter, shows extraction status, and (when the local Ollama service is
-running) can summarize extracted documents.
+against a matter, shows extraction status, and (when the configured generation
+provider is reachable) can summarize extracted documents.
 
 ## Rate limiting and LLM concurrency (Phase 6, Steps 6.3B–6.3D)
 
@@ -654,7 +738,7 @@ processes or machines. This is **not distributed rate limiting**.
 | `PS_RL_ASSISTANT_MAX` / `PS_RL_ASSISTANT_WINDOW` | 10 / 60s | `/assistant/ask` and `/assistant/propose-action` per authenticated user |
 | `PS_RL_DOCUMENT_MAX` / `PS_RL_DOCUMENT_WINDOW` | 20 / 3600s | Document upload and re-extraction per authenticated user |
 | `PS_RL_MAX_KEYS` | 10000 | Hard cap on tracked keys per limiter (bounds memory) |
-| `PS_LLM_MAX_CONCURRENCY` | 1 | Maximum simultaneous Ollama generation calls |
+| `PS_LLM_MAX_CONCURRENCY` | 1 | Maximum simultaneous generation calls (Ollama or OpenRouter) |
 
 Notes:
 
@@ -674,22 +758,108 @@ Notes:
   A saturated LLM gate returns **429** from assistant and summarization routes.
 - Fixed windows can permit a **boundary burst** (up to twice the limit spanning
   two adjacent windows). This is an accepted simplification for a local demo.
-- **Loopback binding is still required.** Rate limiting reduces abuse but does
-  not make the app safe for arbitrary network exposure. Keep the backend on
-  `127.0.0.1`; exposing it needs real authn/authz, TLS, a reverse proxy and
-  distributed limits first.
-- `/docs`, `/redoc` and `/openapi.json` remain **public by design** on loopback.
+- **Hosted deployments run one instance/worker.** Limiters and the LLM gate are
+  in-process, so multiple workers or instances would each keep independent
+  counters. Behind a platform proxy, `request.client` is the proxy address, so
+  address-keyed limits (notably login) are shared by all clients; keep the
+  default limits and do not trust `X-Forwarded-For` without a reviewed
+  trusted-proxy design.
+- `/docs`, `/redoc` and `/openapi.json` remain **public by design** and should
+  be reviewed before exposing the service publicly.
+
+## Deployment (Vercel + Render)
+
+This repository is **prepared for** a Vercel frontend + Render backend
+deployment; it is **not deployed**, and no real service URLs are committed.
+Do not add a `frontend/vercel.json` rewrite until the actual Render service URL
+is known.
+
+**Backend on Render**
+
+```
+Root Directory:  backend
+Build Command:   pip install -r requirements.txt
+Start Command:   uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+Health Check:    /health
+```
+
+`app.main:app` is the entry point. Do **not** use `python -m app.launcher` on
+Render — it intentionally binds to loopback. Pin `PYTHON_VERSION` to the latest
+**3.13.x** (minimum 3.11; all pinned dependencies declare 3.11+ support).
+Python 3.14.6 also passes the suite locally, but `uvloop`'s metadata stops at
+3.13. Run a **single instance and one worker**: rate limits and the LLM gate are
+in-process and SQLite is single-writer.
+
+**Required production environment** (template: `backend/.env.production.example`):
+
+- `PS_ALLOWED_ORIGINS` — exact comma-separated browser origin(s), for example
+  `https://<your-vercel-production-origin>`; no wildcard. It is shared by CORS
+  and the CSRF origin check. Invalid values fail startup.
+- `PS_AUTH_COOKIE_SECURE=true` — required over HTTPS; do not set it locally.
+- `PS_APP_DB=/var/data/app.db` and `PS_DOCS_DIR=/var/data/documents` — required
+  with a Render persistent disk mounted at `/var/data`.
+- Generation (optional): `PS_LLM_PROVIDER=openrouter` plus
+  `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, and optionally
+  `OPENROUTER_BASE_URL` / `OPENROUTER_TIMEOUT`. The key is backend-only; never
+  put it in a `VITE_*` variable or commit it. Without these, generation remains
+  on local Ollama and will return `503` on Render.
+- Embeddings: `OLLAMA_URL` (and `OLLAMA_EMBED_MODEL`) only if a reachable
+  Ollama embedding service is configured. OpenRouter does **not** provide
+  embeddings here; without a reachable embedder, keyword retrieval still works.
+
+**Persistent storage is mandatory.** Render's default filesystem is ephemeral.
+Without a persistent disk, SQLite (clients, matters, tasks, documents,
+extracted text, embeddings, users, sessions, proposals, audit) **and** uploaded
+files are lost on every restart, redeploy or spin-down. The disk must hold both
+the database and the documents directory, and backups must include both
+(including SQLite `-wal`/`-shm` or after a checkpoint). A disk also prevents
+zero-downtime deploys and cannot be shared by multiple instances.
+
+**Authentication across origins.** Deploy the API on the same origin as the
+frontend (for example a Vercel rewrite from `/api/*` to the Render service) and
+build the frontend with `VITE_API_BASE_URL=/api`. A direct cross-site
+deployment (`*.vercel.app` calling `*.onrender.com`) cannot work with the
+host-only `SameSite=Lax` session cookie and the readable rotated CSRF cookie;
+do not weaken either control to compensate. The Vercel production origin must
+be present in `PS_ALLOWED_ORIGINS`. The frontend refuses to fall back to
+`http://127.0.0.1:8000` in a production build when `VITE_API_BASE_URL` is
+missing.
+
+**Single-user bootstrap.** After the service starts, create the one account on
+Render Shell:
+
+```bash
+cd backend && python -m scripts.create_user --username <name>
+```
+
+The password is entered at a hidden prompt. Startup fails closed if more than
+one active account exists; the demo does not support multi-user operation.
+
+**AI generation is local Ollama by default; hosted OpenRouter is optional.** A
+hosted backend cannot reach Ollama on `127.0.0.1`. Without a reachable generation
+provider, upload/list/extract and keyword retrieval still work, but
+summarization and assistant calls return `503`. Configure
+`PS_LLM_PROVIDER=openrouter` with a backend-only `OPENROUTER_API_KEY` and an
+`OPENROUTER_MODEL` available to your account to enable hosted generation.
+Embeddings remain separate: a hosted backend without a reachable Ollama
+embedding endpoint skips semantic retrieval and uses keyword retrieval
+(`/ollama/health` reports the local embedding service unavailable). Do not
+assume AI works in production until the chosen provider is configured and
+reachable. Hosted inference sends prompt/context to the external provider; use
+fictional demo data unless its data-handling terms have been reviewed. Free
+models, limits and terms can change; no model or price is guaranteed.
 
 ## Tests
 
-Backend — 342 tests (run from `backend/`; tests use temporary databases and
-storage directories, never `data/`):
+Backend (run from `backend/`; tests use temporary databases and storage
+directories, never `data/`). Install development dependencies first with
+`backend/.venv/bin/pip install -r backend/requirements-dev.txt`:
 
 ```bash
 cd backend && .venv/bin/python -m pytest -v
 ```
 
-Frontend — 32 tests across 5 files (run from `frontend/`):
+Frontend:
 
 ```bash
 cd frontend && npm test
@@ -703,6 +873,13 @@ Type-checks, then outputs to `frontend/dist`:
 cd frontend && npm run build
 ```
 
+A production build must set `VITE_API_BASE_URL` (Vite inlines it at build time;
+the value cannot be changed without rebuilding). When the API is proxied on the
+same origin, use `VITE_API_BASE_URL=/api`. If the variable is missing or blank
+in a production bundle, the app throws a clear error instead of silently calling
+`http://127.0.0.1:8000`; local development still defaults to the loopback
+backend.
+
 Linting (Oxlint):
 
 ```bash
@@ -711,11 +888,23 @@ cd frontend && npm run lint
 
 ## Known limitations (read before using)
 
-- **Single-user, loopback-only demo.** The runtime policy permits at most one
-  active account: bootstrap refuses a second distinct account and startup fails
-  closed if more than one active account exists (see "Single-user policy"). The
-  `role` field is reserved and is **not** enforced. There is **no
-  authorization/roles enforcement and no encryption** (see below).
+- **Single-user demo.** The runtime policy permits at most one active account:
+  bootstrap refuses a second distinct account and startup fails closed if more
+  than one active account exists (see "Single-user policy"). The `role` field is
+  reserved and is **not** enforced. There is **no authorization/roles
+  enforcement and no encryption** (see below). Hosting requires a single
+  instance and persistent storage (see [Deployment](#deployment-vercel--render)).
+- **Local AI by default.** Summaries and assistant answers use Ollama at
+  `http://127.0.0.1:11434` unless `PS_LLM_PROVIDER=openrouter` is configured.
+  Embeddings always use Ollama; a hosted backend cannot reach it unless a remote
+  embedding endpoint is configured, so semantic retrieval may be disabled while
+  keyword retrieval continues to work. Without a reachable generation provider,
+  summarization and assistant calls return `503`. Hosted inference sends the
+  prompt and retrieved context to the selected external provider.
+- **Hosted data durability is deployment-dependent.** On an ephemeral
+  filesystem, all SQLite data and uploaded documents are lost on restart or
+  redeploy. A persistent disk is required for real use, and backups are not
+  automated by this repository.
 - Authentication (backend and frontend login) is enforced and
   approval/rejection records the accountable actor, but there is **no
   authorization/roles enforcement and no encryption** — files are stored
@@ -723,9 +912,9 @@ cd frontend && npm run lint
   (authentication is **not** record ownership or tenant isolation). Not suitable
   for real confidential legal or financial documents.
 - No OCR: scanned PDFs report `extraction_failed` honestly instead of inventing text.
-- Summaries are generated by a small local model and can be wrong; every summary
-  is flagged `review_required` and must be checked by a human against the
-  source excerpts provided alongside it.
+- Summaries are generated by the configured model and can be wrong; every
+  summary is flagged `review_required` and must be checked by a human against
+  the source excerpts provided alongside it.
 - `/assistant/ask` combines deterministic keyword matching with best-effort
   semantic (embedding) retrieval. Semantic ranking uses cosine similarity,
   which measures proximity in embedding space — **not** factual support. The
@@ -757,5 +946,5 @@ cd frontend && npm run lint
   execution revalidates only that the matter still exists, not evidence freshness.
 - Uploaded content is treated as untrusted in the summarization and assistant
   prompts (prompt injection is mitigated — bounded retrieval, untrusted tags,
-  server-side evidence — not impossible with local models).
+  server-side evidence — not impossible with any LLM).
 - SQLite file storage, single process, no migrations framework, no backups.

@@ -4,7 +4,9 @@ Milestone 1 exposes only lightweight discovery and health endpoints so that
 the frontend and future services have a stable contract to depend on.
 """
 
+import os
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from . import auth as auth_module
 from .db import connect, resolve_db_path
+from .llm import validate_llm_configuration
 from .routers import assistant, auth, clients, documents, matters, ollama, tasks
 
 APP_NAME = "Professional Services AI OS"
@@ -26,6 +29,7 @@ async def lifespan(_app: FastAPI):
     mutates data) and fails closed if more than one active account exists. Zero
     accounts is allowed so first-time setup can still bootstrap a user.
     """
+    validate_llm_configuration()
     conn = connect(resolve_db_path())
     try:
         auth_module.verify_single_user_policy(conn)
@@ -33,13 +37,78 @@ async def lifespan(_app: FastAPI):
         conn.close()
     yield
 
-# Local Vite development server origins only. Exact origins, never a wildcard:
-# credentialed CORS (cookies) is enabled below and must never be combined with
-# a wildcard origin.
-ALLOWED_ORIGINS = [
+# Local Vite development server origins, used when PS_ALLOWED_ORIGINS is not
+# set. Credentialed CORS (cookies) is enabled below, so origins must be exact
+# and are never wildcarded.
+DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+
+
+def _normalise_origin(raw: str) -> str:
+    """Validate one origin and return its canonical form.
+
+    Accepts only an exact ``http(s)://host[:port]`` origin. Paths, queries,
+    fragments, userinfo, whitespace, wildcards and non-HTTP schemes are
+    rejected. Trailing slashes are tolerated and removed.
+    """
+    candidate = raw.strip().rstrip("/")
+    if not candidate or "*" in candidate or any(c.isspace() for c in candidate):
+        raise ValueError("PS_ALLOWED_ORIGINS contains an invalid origin")
+    parsed = urlsplit(candidate)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("PS_ALLOWED_ORIGINS origins must use http or https")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("PS_ALLOWED_ORIGINS origins must not contain userinfo")
+    if parsed.netloc.endswith(":"):
+        raise ValueError("PS_ALLOWED_ORIGINS contains an invalid port")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            "PS_ALLOWED_ORIGINS origins must not contain a path, query or fragment"
+        )
+    if not parsed.hostname:
+        raise ValueError("PS_ALLOWED_ORIGINS contains an invalid origin")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("PS_ALLOWED_ORIGINS contains an invalid port") from exc
+
+    host = parsed.hostname.lower()
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80
+    suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{host}{suffix}"
+
+
+def parse_allowed_origins(raw: str | None) -> list[str]:
+    """Parse, validate and de-duplicate a comma-separated origin allowlist.
+
+    Missing or blank configuration falls back to the localhost development
+    origins. Any invalid entry fails closed instead of being ignored.
+    """
+    if raw is None or not raw.strip():
+        return list(DEFAULT_ALLOWED_ORIGINS)
+
+    origins: list[str] = []
+    for entry in raw.split(","):
+        origin = _normalise_origin(entry)
+        if origin not in origins:
+            origins.append(origin)
+    if not origins:
+        raise ValueError("PS_ALLOWED_ORIGINS must contain at least one origin")
+    return origins
+
+
+def configured_origins() -> list[str]:
+    """Exact allowed browser origins from PS_ALLOWED_ORIGINS (read at startup)."""
+    return parse_allowed_origins(os.environ.get("PS_ALLOWED_ORIGINS"))
+
+
+# Evaluated once at import so CORS and the CSRF origin check share one list.
+ALLOWED_ORIGINS = configured_origins()
 
 # Smallest explicit set of request headers the frontend actually sends:
 # `Content-Type` for JSON bodies and `X-CSRF-Token` for the session-bound

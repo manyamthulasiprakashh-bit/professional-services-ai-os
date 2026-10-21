@@ -216,3 +216,76 @@ def test_local_assistant_wraps_network_errors(monkeypatch) -> None:
     monkeypatch.setattr(llm.httpx, "post", boom)
     with pytest.raises(llm.LLMUnavailableError, match="Could not reach"):
         llm.LocalOllamaAssistant(model="m", timeout=1).answer("q")
+
+
+# --- bounded generation options ---------------------------------------------
+
+
+def test_generation_options_defaults_and_env_override(monkeypatch) -> None:
+    from app import llm
+
+    monkeypatch.delenv("OLLAMA_NUM_PREDICT", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_CTX", raising=False)
+    assert llm.generation_options() == {
+        "temperature": 0.2,
+        "num_predict": 256,
+        "num_ctx": 4096,
+    }
+
+    monkeypatch.setenv("OLLAMA_NUM_PREDICT", "64")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "2048")
+    assert llm.num_predict_tokens() == 64
+    assert llm.num_ctx_tokens() == 2048
+
+
+def test_generation_options_fall_back_on_invalid_env(monkeypatch) -> None:
+    from app import llm
+
+    monkeypatch.setenv("OLLAMA_NUM_PREDICT", "not-a-number")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "-5")
+    assert llm.num_predict_tokens() == llm.DEFAULT_NUM_PREDICT
+    assert llm.num_ctx_tokens() == llm.DEFAULT_NUM_CTX
+
+
+def test_assistant_request_carries_bounded_options(monkeypatch) -> None:
+    from app import llm
+
+    captured: dict = {}
+
+    def fake_post(url, json=None, **kwargs):
+        captured.update(json or {})
+        return _FakeResponse(200, {"response": "ok"})
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+    monkeypatch.setenv("OLLAMA_NUM_PREDICT", "80")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "1024")
+    llm.LocalOllamaAssistant(model="m", timeout=1).answer("q")
+
+    assert captured["options"] == {
+        "temperature": 0.2,
+        "num_predict": 80,
+        "num_ctx": 1024,
+    }
+
+
+def test_summarizer_request_carries_bounded_options(monkeypatch) -> None:
+    from app import llm
+    from app.extraction import ExtractedChunk
+
+    captured: dict = {}
+
+    def fake_post(url, json=None, **kwargs):
+        captured.update(json or {})
+        return _FakeResponse(
+            200, {"response": '{"summary": "s", "key_points": []}'}
+        )
+
+    monkeypatch.setattr(llm.httpx, "post", fake_post)
+    monkeypatch.delenv("OLLAMA_NUM_PREDICT", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_CTX", raising=False)
+    llm.LocalOllamaSummarizer(model="m", timeout=1).summarize(
+        "title", [ExtractedChunk(page_number=None, content="body")]
+    )
+
+    assert captured["options"]["num_predict"] == 256
+    assert captured["options"]["num_ctx"] == 4096

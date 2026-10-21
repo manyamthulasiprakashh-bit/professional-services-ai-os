@@ -358,4 +358,77 @@ describe('AssistantPage', () => {
       await screen.findByText(/No suitable existing matter was found/i),
     ).toBeInTheDocument()
   })
+
+  it('sends only one question request for repeated clicks', async () => {
+    let resolveAsk: ((value: Response) => void) | undefined
+    const pending = new Promise<Response>((resolve) => {
+      resolveAsk = resolve
+    })
+    vi.mocked(fetch).mockReturnValueOnce(pending)
+
+    render(<AssistantPage />)
+    fireEvent.change(screen.getByLabelText(/^Question$/i), {
+      target: { value: 'What is the fee cap?' },
+    })
+    const ask = screen.getByRole('button', { name: /^Ask$/i })
+    fireEvent.click(ask)
+    fireEvent.click(ask)
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Asking/i })).toBeDisabled(),
+    )
+    const askCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).endsWith('/assistant/ask'))
+    expect(askCalls).toHaveLength(1)
+
+    resolveAsk!(jsonResponse(ANSWER_WITH_EVIDENCE))
+    expect(
+      await screen.findByText(/fee cap of \$50,000/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Ask$/i })).not.toBeDisabled()
+  })
+
+  it('sends only one proposal request for repeated clicks', async () => {
+    let resolvePropose: ((value: Response) => void) | undefined
+    const pending = new Promise<Response>((resolve) => {
+      resolvePropose = resolve
+    })
+    vi.mocked(fetch).mockReturnValueOnce(pending)
+
+    render(<AssistantPage />)
+    fireEvent.change(screen.getByRole('textbox', { name: /^Request$/i }), {
+      target: { value: 'Add a task for Harbor' },
+    })
+    const propose = screen.getByRole('button', { name: /Request proposal/i })
+    fireEvent.click(propose)
+    fireEvent.click(propose)
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Requesting proposal/i }),
+      ).toBeDisabled(),
+    )
+    const proposeCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) =>
+        String(url).endsWith('/assistant/propose-action'),
+      )
+    expect(proposeCalls).toHaveLength(1)
+
+    resolvePropose!(
+      jsonResponse({
+        proposal: null,
+        reason: 'No suitable existing matter was found.',
+        machine_generated: true,
+        review_required: true,
+      }),
+    )
+    expect(
+      await screen.findByText(/No suitable existing matter was found/i),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /Request proposal/i }),
+    ).not.toBeDisabled()
+  })
 })

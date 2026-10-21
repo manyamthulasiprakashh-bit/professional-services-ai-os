@@ -68,6 +68,23 @@ def test_session_cookie_is_httponly_but_csrf_cookie_is_readable(anon_client, con
     assert "HttpOnly" not in csrf_cookie
 
 
+def test_login_cookies_are_secure_when_enabled(anon_client, conn, monkeypatch) -> None:
+    """Production opt-in marks both cookies Secure without changing the rest."""
+    monkeypatch.setenv("PS_AUTH_COOKIE_SECURE", "true")
+    make_user(conn)
+    response = _login(anon_client, TEST_USERNAME, TEST_PASSWORD)
+
+    cookies = response.headers.get_list("set-cookie")
+    for name in (SESSION_COOKIE_NAME, CSRF_COOKIE_NAME):
+        cookie = next(c for c in cookies if c.startswith(name))
+        assert "Secure" in cookie
+        assert "samesite=lax" in cookie.lower()
+    session_cookie = next(
+        c for c in cookies if c.startswith(SESSION_COOKIE_NAME)
+    )
+    assert "HttpOnly" in session_cookie
+
+
 def test_login_unknown_user_is_generic_401(anon_client) -> None:
     response = _login(anon_client, "nobody", "a-strong-password-1")
     assert response.status_code == 401

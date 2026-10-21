@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import {
   approveProposal,
   askQuestion,
@@ -66,9 +66,15 @@ function decisionFailureMessage(error: unknown): string {
 export default function AssistantPage() {
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState<AnswerState>({ kind: 'idle' })
+  const [asking, setAsking] = useState(false)
+  // Synchronous guard: a repeated click in the same tick cannot slip past the
+  // state update and issue a second expensive request.
+  const askingRef = useRef(false)
 
   const [request, setRequest] = useState('')
   const [proposal, setProposal] = useState<ProposalState>({ kind: 'idle' })
+  const [proposing, setProposing] = useState(false)
+  const proposingRef = useRef(false)
 
   const [decidingAction, setDecidingAction] = useState<
     'approve' | 'reject' | null
@@ -79,8 +85,11 @@ export default function AssistantPage() {
   const onAsk = useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault()
+      if (askingRef.current) return
       const trimmed = question.trim()
       if (!trimmed) return
+      askingRef.current = true
+      setAsking(true)
       setAnswer({ kind: 'loading' })
       try {
         setAnswer({ kind: 'loaded', answer: await askQuestion(trimmed) })
@@ -92,6 +101,9 @@ export default function AssistantPage() {
             'Unexpected error while asking the assistant.',
           ),
         })
+      } finally {
+        askingRef.current = false
+        setAsking(false)
       }
     },
     [question],
@@ -100,8 +112,11 @@ export default function AssistantPage() {
   const onPropose = useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault()
+      if (proposingRef.current) return
       const trimmed = request.trim()
       if (!trimmed) return
+      proposingRef.current = true
+      setProposing(true)
       setProposal({ kind: 'loading' })
       setDecisionMessage(null)
       try {
@@ -124,6 +139,9 @@ export default function AssistantPage() {
             'Unexpected error while requesting a proposal.',
           ),
         })
+      } finally {
+        proposingRef.current = false
+        setProposing(false)
       }
     },
     [request],
@@ -217,8 +235,12 @@ export default function AssistantPage() {
             maxLength={2000}
           />
         </label>
-        <button className="button" type="submit" disabled={!question.trim()}>
-          Ask
+        <button
+          className="button"
+          type="submit"
+          disabled={!question.trim() || asking}
+        >
+          {asking ? 'Asking…' : 'Ask'}
         </button>
       </form>
 
@@ -305,8 +327,12 @@ export default function AssistantPage() {
             maxLength={2000}
           />
         </label>
-        <button className="button" type="submit" disabled={!request.trim()}>
-          Request proposal
+        <button
+          className="button"
+          type="submit"
+          disabled={!request.trim() || proposing}
+        >
+          {proposing ? 'Requesting proposal…' : 'Request proposal'}
         </button>
       </form>
 

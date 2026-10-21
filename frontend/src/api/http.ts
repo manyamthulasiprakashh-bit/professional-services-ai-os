@@ -1,3 +1,5 @@
+import { apiBaseUrl } from '../config'
+
 /** Shared shape of API errors raised by the http helper. */
 export class ApiError extends Error {
   readonly status?: number
@@ -87,9 +89,7 @@ async function request<T>(
   init: RequestInit,
   signal?: AbortSignal,
 ): Promise<T> {
-  const base = (
-    import.meta.env.VITE_API_BASE_URL?.trim() || 'http://127.0.0.1:8000'
-  ).replace(/\/+$/, '')
+  const base = apiBaseUrl
 
   const method = (init.method ?? 'GET').toUpperCase()
   const headers = new Headers(init.headers)
@@ -108,7 +108,9 @@ async function request<T>(
       signal,
     })
   } catch (cause) {
+    if (signal?.aborted) throw cause
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+    if (cause && typeof cause === 'object' && (cause as { name?: string }).name === 'AbortError') throw cause
     throw new ApiError(`Could not reach the backend at ${base}. Is it running?`)
   }
 

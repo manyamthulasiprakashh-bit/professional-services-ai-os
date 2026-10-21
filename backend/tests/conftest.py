@@ -24,6 +24,28 @@ TEST_PASSWORD = "a-strong-password-1"
 
 
 @pytest.fixture(autouse=True)
+def _clear_llm_provider_env(monkeypatch) -> None:
+    """Keep provider selection deterministic across the whole suite."""
+    for name in (
+        "PS_LLM_PROVIDER",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_TIMEOUT",
+        "OLLAMA_URL",
+        "OLLAMA_SUMMARY_MODEL",
+        "OLLAMA_ASSISTANT_MODEL",
+        "OLLAMA_EMBED_MODEL",
+        "OLLAMA_SUMMARY_TIMEOUT",
+        "OLLAMA_ASSISTANT_TIMEOUT",
+        "OLLAMA_EMBED_TIMEOUT",
+        "OLLAMA_NUM_PREDICT",
+        "OLLAMA_NUM_CTX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limits() -> Iterator[None]:
     """Reset shared limiter state before each test.
 

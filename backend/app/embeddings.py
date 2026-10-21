@@ -131,6 +131,16 @@ def index_stats(conn: sqlite3.Connection) -> tuple[int, set[str], set[int]]:
     return row["n"], models, dims
 
 
+def has_index(conn: sqlite3.Connection) -> bool:
+    """True when at least one stored chunk embedding exists.
+
+    Read-only and cheap: used to skip query embedding entirely when there is
+    nothing to rank (an empty index is not the same as a stale one).
+    """
+    row = conn.execute("SELECT 1 FROM chunk_embeddings LIMIT 1").fetchone()
+    return row is not None
+
+
 def is_stale(conn: sqlite3.Connection, embedder: Embedder) -> bool:
     """True when stored vectors don't match the configured embedding model.
 
