@@ -213,12 +213,24 @@ def apply_schema(conn: sqlite3.Connection) -> None:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    """Open a connection with sane defaults and apply the schema."""
+    """Open a connection with sane defaults and apply the schema.
+
+    ``check_same_thread=False`` is required by the FastAPI lifecycle: synchronous
+    dependencies and synchronous endpoints both run on Starlette's worker
+    thread-pool, and each step may land on a different worker. A connection is
+    created per request (``db_session``/``get_db``), used only by that request,
+    and closed when it finishes; it is never shared between concurrent requests.
+    The handoff between workers is therefore sequential, and CPython's sqlite3
+    is compiled in serialized mode here (``sqlite3.threadsafety == 3``), so the
+    connection itself remains safe. Transaction commit/rollback still happen
+    exactly once, in ``db_session``, after the request's DB work is complete.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
         db_path,
         detect_types=sqlite3.PARSE_DECLTYPES,
         timeout=busy_timeout_seconds(),
+        check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

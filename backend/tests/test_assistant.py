@@ -123,6 +123,29 @@ def test_ask_returns_503_when_provider_unavailable(client) -> None:
     assert "/" not in detail
 
 
+def test_ask_succeeds_after_a_failed_request(client, fake) -> None:
+    """A provider failure must not leak or poison the per-request DB session."""
+    from app.main import app
+    from app.routers import assistant as assistant_router
+
+    app.dependency_overrides[assistant_router.get_assistant] = lambda: BrokenAssistant()
+    try:
+        assert client.post(
+            "/assistant/ask", json={"question": QUESTION}
+        ).status_code == 503
+    finally:
+        app.dependency_overrides.clear()
+
+    app.dependency_overrides[assistant_router.get_assistant] = lambda: fake
+    try:
+        response = client.post("/assistant/ask", json={"question": QUESTION})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["answer"].strip()
+
+
 def test_ask_missing_body_422(client) -> None:
     assert client.post("/assistant/ask", json={}).status_code == 422
 

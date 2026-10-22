@@ -170,8 +170,8 @@ export default function DocumentsPage() {
 
       {ollama && !ollama.available && (
         <p className="page__message" role="status">
-          The local summarization service (Ollama) is not reachable, so summaries
-          are disabled. Everything else works normally.
+          Local Ollama is unavailable; summarization and embeddings require a
+          reachable local model. Upload and keyword retrieval still work.
         </p>
       )}
 
@@ -250,8 +250,8 @@ export default function DocumentsPage() {
                       doc.status !== 'extracted'
                         ? 'Text must be extracted first'
                         : ollama?.available === false
-                          ? 'Summarization service unavailable'
-                          : 'Summarize with the local model'
+                          ? 'Summarization service unavailable (external mode uses OpenRouter)'
+                          : 'Summarize with the assistant'
                     }
                   >
                     {summarizingId === doc.id ? 'Summarizing…' : 'Summarize'}

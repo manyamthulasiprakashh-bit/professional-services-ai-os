@@ -211,6 +211,7 @@ Generation provider selection is explicit and backend-only:
 | `OPENROUTER_MODEL` | — | Required model identifier. It must currently be available to your OpenRouter account; this repository does not pin or guarantee a particular model. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter-compatible API base. HTTPS is required outside loopback (plain HTTP is allowed only for local tests). |
 | `OPENROUTER_TIMEOUT` | `180` | Request timeout in seconds, bounded to 1–600. |
+| `OPENROUTER_MAX_TOKENS` | `2048` | Output token budget, bounded to 1–8192. Kept larger than the Ollama default because reasoning models count reasoning tokens against it; too small a budget can return empty content. |
 
 `PS_LLM_PROVIDER=openrouter` affects **document summarization and assistant
 generation only**. Embeddings continue to use the existing local Ollama
@@ -220,12 +221,15 @@ retrieval is skipped and the keyword/ID path still works (with no embeddings
 indexed, that is the normal path). Keyword fallback is preserved exactly.
 
 OpenRouter is used through an OpenAI-compatible `POST /chat/completions` call
-with the same server-composed prompts, 256-token output cap, temperature `0.2`,
-and single concurrency gate. The key is sent only in the
-`Authorization: Bearer` header and is never returned, logged or included in
-errors. There is **no automatic fallback** between providers: provider failures
-return the existing safe `503`; a saturated local concurrency gate still returns
-`429`.
+with the same server-composed prompts, temperature `0.2`, a bounded output
+budget (`OPENROUTER_MAX_TOKENS`, default **2048**), and the single concurrency
+gate. The key is sent only in the `Authorization: Bearer` header and is never
+returned, logged or included in errors. Provider timeouts, rate limits, HTTP
+errors, unreadable responses, error-shaped HTTP 200 bodies and empty content are
+reported as safe `503` messages; an exhausted output budget is called out
+separately. There is **no automatic fallback** between providers and no answer
+is fabricated when the provider fails; a saturated local concurrency gate still
+returns `429`.
 
 OpenRouter model availability, free-model offers, rate limits, pricing and
 service terms can change at any time. Do not assume a model is free or
@@ -263,12 +267,15 @@ any kind.
 `OLLAMA_NUM_PREDICT` (default **256** output tokens) and `OLLAMA_NUM_CTX`
 (default **4096** context tokens). Both are read at request time, so tests and
 operators can override them without a code change; invalid or non-positive
-values fall back to the defaults. OpenRouter calls use the same
-`OLLAMA_NUM_PREDICT` value as `max_tokens` and `OPENROUTER_TIMEOUT` for the
-request timeout. Retrieval is bounded well below the context window (evidence
-≤ 6,000 chars, question ≤ 2,000 chars), and summarization caps document text at
-6,000 chars. When the semantic index is empty, the per-question query-embedding
-call is skipped entirely — keyword/ID retrieval is unchanged.
+values fall back to the defaults. OpenRouter calls use `OPENROUTER_MAX_TOKENS`
+(default **2048**, bounded 1–8192) as `max_tokens` and `OPENROUTER_TIMEOUT` for
+the request timeout. The larger hosted budget is deliberate: reasoning models
+count reasoning tokens against `max_tokens`, and a budget that is too small can
+produce HTTP 200 with empty content. Retrieval is bounded well below the context
+window (evidence ≤ 6,000 chars, question ≤ 2,000 chars), and summarization caps
+document text at 6,000 chars. When the semantic index is empty, the
+per-question query-embedding call is skipped entirely — keyword/ID retrieval is
+unchanged.
 
 **Evidence is server-side, never model-generated.** Every entry in `evidence`
 points at an actual retrieved record with a stable ID (client/matter/task id,
@@ -826,9 +833,9 @@ in-process and SQLite is single-writer.
   with a Render persistent disk mounted at `/var/data`.
 - Generation (optional): `PS_LLM_PROVIDER=openrouter` plus
   `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, and optionally
-  `OPENROUTER_BASE_URL` / `OPENROUTER_TIMEOUT`. The key is backend-only; never
-  put it in a `VITE_*` variable or commit it. Without these, generation remains
-  on local Ollama and will return `503` on Render.
+  `OPENROUTER_BASE_URL` / `OPENROUTER_TIMEOUT` / `OPENROUTER_MAX_TOKENS`. The
+  key is backend-only; never put it in a `VITE_*` variable or commit it. Without
+  these, generation remains on local Ollama and will return `503` on Render.
 - Embeddings: `OLLAMA_URL` (and `OLLAMA_EMBED_MODEL`) only if a reachable
   Ollama embedding service is configured. OpenRouter does **not** provide
   embeddings here; without a reachable embedder, keyword retrieval still works.

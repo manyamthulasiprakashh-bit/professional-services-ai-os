@@ -13,6 +13,7 @@ from ..llm import (
     LLMConcurrencyError,
     LLMUnavailableError,
     Summarizer,
+    DisabledEmbedder,
     get_embedder,
     get_summarizer,
 )
@@ -27,6 +28,13 @@ from ..ratelimit_config import document_rate_limit
 from ..security import require_user
 
 logger = logging.getLogger(__name__)
+
+
+def get_embedder_safe() -> Embedder:
+    try:
+        return get_embedder()
+    except Exception:
+        return DisabledEmbedder()
 
 router = APIRouter(
     prefix="/documents", tags=["documents"], dependencies=[Depends(require_user)]
@@ -193,7 +201,21 @@ def index_status(
     conn: sqlite3.Connection = Depends(get_db),
     embedder: Embedder = Depends(get_embedder),
 ) -> DocumentIndexStatus:
-    """Report embedding-index status for all documents (Step 5.3)."""
+    """Report embedding-index status for all documents."""
+    if isinstance(embedder, DisabledEmbedder):
+        indexed_chunks = 0
+        indexed_documents = 0
+        total_documents = conn.execute(
+            "SELECT COUNT(*) AS n FROM documents WHERE status = 'extracted'"
+        ).fetchone()["n"]
+        return DocumentIndexStatus(
+            embed_model=embedder.embed_model,
+            dimension=None,
+            indexed_chunks=indexed_chunks,
+            indexed_documents=indexed_documents,
+            total_documents=total_documents,
+            stale=False,
+        )
     _, _, dims = embeddings.index_stats(conn)
     indexed_chunks = conn.execute(
         "SELECT COUNT(*) AS n FROM chunk_embeddings"
@@ -214,19 +236,26 @@ def index_status(
         stale=embeddings.is_stale(conn, embedder),
     )
 
-
 @router.post("/index", response_model=DocumentIndexResult)
-def backfill_index(
+def index_all(
     conn: sqlite3.Connection = Depends(get_db),
-    embedder: Embedder = Depends(get_embedder),
+    embedder: Embedder = Depends(get_embedder_safe),
 ) -> DocumentIndexResult:
-    """Backfill/retry embeddings for all extracted documents (Step 5.3).
-
-    Never raises on provider failure: returns honest per-document counts.
-    Failed documents keep their previous index untouched and can be retried;
-    keyword retrieval remains available throughout. Not run automatically at
-    startup.
-    """
+    """Index all extracted documents that are missing embeddings."""
+    if isinstance(embedder, DisabledEmbedder):
+        result = DocumentIndexResult(
+            embed_model=getattr(embedder, "embed_model", "disabled"),
+            dimension=None,
+            documents=0,
+            indexed=0,
+            skipped=0,
+            failed=0,
+        )
+        result.errors.append(
+            "Semantic indexing is disabled in this deployment. "
+            "Keyword and ID-based retrieval are still available."
+        )
+        return result
     rows = conn.execute(
         "SELECT id FROM documents WHERE status = 'extracted' ORDER BY id"
     ).fetchall()
@@ -242,32 +271,51 @@ def backfill_index(
     for row in rows:
         try:
             outcome = embeddings.upsert_chunk_embeddings(conn, embedder, row["id"])
-        except LLMUnavailableError as exc:
+            result.indexed += outcome.indexed
+            result.skipped += outcome.skipped
+            if outcome.dimension is not None:
+                result.dimension = outcome.dimension
+        except Exception as exc:
             result.failed += 1
-            if str(exc) not in result.errors:
-                result.errors.append(str(exc))
+            msg = str(exc)
+            if msg and msg not in result.errors:
+                result.errors.append(msg)
             continue
-        except Exception:
-            result.failed += 1
-            if "Indexing failed for one or more documents." not in result.errors:
-                result.errors.append("Indexing failed for one or more documents.")
-            continue
-        result.indexed += outcome.indexed
-        result.skipped += outcome.skipped
-        if outcome.dimension is not None:
-            result.dimension = outcome.dimension
-
     return result
-
 
 @router.post("/{document_id}/index", response_model=DocumentIndexResult)
 def index_document(
     document_id: int,
     conn: sqlite3.Connection = Depends(get_db),
-    embedder: Embedder = Depends(get_embedder),
+    embedder: Embedder = Depends(get_embedder_safe),
 ) -> DocumentIndexResult:
-    """Index (or re-index) a single extracted document. 404 if unknown or not
-    extracted; honest counts otherwise."""
+    """Index (or re-index) a single extracted document.
+
+    When embeddings are disabled, return a clear safe response with no
+    provider calls.
+    """
+    if isinstance(embedder, DisabledEmbedder):
+        # Still validate document existence (matches prior behavior expectations)
+        try:
+            repository.get_document(conn, document_id)
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document {document_id} not found.",
+            ) from exc
+        result = DocumentIndexResult(
+            embed_model=getattr(embedder, "embed_model", "disabled"),
+            dimension=None,
+            documents=1,
+            indexed=0,
+            skipped=0,
+            failed=0,
+        )
+        result.errors.append(
+            "Semantic indexing is disabled in this deployment. "
+            "Keyword and ID-based retrieval are still available."
+        )
+        return result
     try:
         row = repository.get_document(conn, document_id)
     except LookupError as exc:

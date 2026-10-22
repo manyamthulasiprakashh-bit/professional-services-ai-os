@@ -43,7 +43,7 @@ describe('DocumentsPage', () => {
 
     expect(await screen.findByText(/No documents yet/i)).toBeInTheDocument()
     expect(
-      await screen.findByText(/summarization service \(Ollama\) is not reachable/i),
+      await screen.findByText(/unavailable/i),
     ).toBeInTheDocument()
   })
 

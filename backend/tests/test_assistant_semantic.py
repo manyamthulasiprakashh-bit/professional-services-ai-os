@@ -13,8 +13,12 @@ from test_assistant_retrieval import _seed_workspace
 def _override(embedder):
     from app.main import app
     from app.routers import assistant as assistant_router
+    from app.routers import documents as documents_router
 
     app.dependency_overrides[assistant_router.get_embedder] = lambda: embedder
+    app.dependency_overrides[assistant_router.get_embedder_safe] = lambda: embedder
+    app.dependency_overrides[documents_router.get_embedder] = lambda: embedder
+    app.dependency_overrides[documents_router.get_embedder_safe] = lambda: embedder
 
 
 def _clear():
@@ -38,6 +42,7 @@ def _ask(client, question: str, assistant, embedder):
 
     app.dependency_overrides[assistant_router.get_assistant] = lambda: assistant
     app.dependency_overrides[assistant_router.get_embedder] = lambda: embedder
+    app.dependency_overrides[assistant_router.get_embedder_safe] = lambda: embedder
     try:
         return client.post("/assistant/ask", json={"question": question})
     finally:
@@ -221,6 +226,7 @@ def _propose(client, request: str, assistant, embedder):
 
     app.dependency_overrides[assistant_router.get_assistant] = lambda: assistant
     app.dependency_overrides[assistant_router.get_embedder] = lambda: embedder
+    app.dependency_overrides[assistant_router.get_embedder_safe] = lambda: embedder
     try:
         return client.post("/assistant/propose-action", json={"request": request})
     finally:

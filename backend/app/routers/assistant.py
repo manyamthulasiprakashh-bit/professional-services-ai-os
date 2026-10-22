@@ -14,6 +14,7 @@ from ..llm import (
     LLMUnavailableError,
     Assistant,
     Embedder,
+    DisabledEmbedder,
     get_assistant,
     get_embedder,
 )
@@ -29,6 +30,13 @@ from ..schemas import (
 )
 from ..security import require_user
 
+
+def get_embedder_safe() -> Embedder:
+    try:
+        return get_embedder()
+    except Exception:
+        return DisabledEmbedder()
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
@@ -42,7 +50,7 @@ def ask(
     _limit: None = Depends(assistant_rate_limit),
     conn: sqlite3.Connection = Depends(get_db),
     assistant: Assistant = Depends(get_assistant),
-    embedder: Embedder = Depends(get_embedder),
+    embedder: Embedder = Depends(get_embedder_safe),
 ) -> AssistantResponse:
     """Answer a question using bounded hybrid retrieval + the local model.
 
@@ -83,7 +91,7 @@ def propose_action(
     _limit: None = Depends(assistant_rate_limit),
     conn: sqlite3.Connection = Depends(get_db),
     assistant: Assistant = Depends(get_assistant),
-    embedder: Embedder = Depends(get_embedder),
+    embedder: Embedder = Depends(get_embedder_safe),
 ) -> ActionProposalResponse:
     """Propose a workflow action grounded in retrieved records, and persist it.
 

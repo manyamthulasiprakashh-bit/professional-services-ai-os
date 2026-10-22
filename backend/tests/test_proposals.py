@@ -239,10 +239,20 @@ def test_missing_title_yields_no_proposal(client) -> None:
     assert body["proposal"] is None
 
 
-def test_broken_assistant_returns_503(client) -> None:
+def test_broken_assistant_returns_503(client, conn) -> None:
     _seed_workspace(client)
+    before_tasks = _task_count(client)
+    before_proposals = conn.execute(
+        "SELECT COUNT(*) AS n FROM action_proposals"
+    ).fetchone()["n"]
     response = _propose(client, "add a task", BrokenAssistant())
     assert response.status_code == 503
+    # Provider failure cannot create a task or persist a proposal.
+    assert _task_count(client) == before_tasks
+    assert (
+        conn.execute("SELECT COUNT(*) AS n FROM action_proposals").fetchone()["n"]
+        == before_proposals
+    )
 
 
 def test_blank_request_is_422(client) -> None:

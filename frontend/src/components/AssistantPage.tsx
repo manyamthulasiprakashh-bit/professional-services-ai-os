@@ -253,7 +253,7 @@ export default function AssistantPage() {
       {answer.kind === 'loading' && (
         <p className="page__message" role="status">
           <span className="status__spinner" aria-hidden="true" /> Asking the
-          local model…
+          Asking the assistant…
         </p>
       )}
 

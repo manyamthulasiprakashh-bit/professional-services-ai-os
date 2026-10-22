@@ -32,6 +32,7 @@ def _clear_llm_provider_env(monkeypatch) -> None:
         "OPENROUTER_MODEL",
         "OPENROUTER_BASE_URL",
         "OPENROUTER_TIMEOUT",
+        "OPENROUTER_MAX_TOKENS",
         "OLLAMA_URL",
         "OLLAMA_SUMMARY_MODEL",
         "OLLAMA_ASSISTANT_MODEL",
@@ -41,11 +42,21 @@ def _clear_llm_provider_env(monkeypatch) -> None:
         "OLLAMA_EMBED_TIMEOUT",
         "OLLAMA_NUM_PREDICT",
         "OLLAMA_NUM_CTX",
+        "PS_LLM_MAX_CONCURRENCY",
+        "PS_EMBED_PROVIDER",
         "PS_BOOTSTRAP_USERNAME",
         "PS_BOOTSTRAP_PASSWORD",
         "PS_BOOTSTRAP_PASSWORD_HASH",
+        "PS_APP_DB",
+        "PS_DOCS_DIR",
+        "PS_ALLOWED_ORIGINS",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Safe defaults for app startup in tests
+    monkeypatch.setenv("PS_LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("PS_EMBED_PROVIDER", "none")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_MODEL", "test/model")
 
 
 @pytest.fixture(autouse=True)

@@ -25,6 +25,12 @@ DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 180.0
 MIN_OPENROUTER_TIMEOUT_SECONDS = 1.0
 MAX_OPENROUTER_TIMEOUT_SECONDS = 600.0
+# Reasoning tokens count against max_tokens on most providers. A small budget
+# (e.g. the Ollama default of 256) can be fully consumed by reasoning, producing
+# HTTP 200 with empty content and finish_reason="length" — especially with the
+# dynamic `openrouter/free` router. Keep a separate, larger bounded budget.
+DEFAULT_OPENROUTER_MAX_TOKENS = 2048
+MAX_OPENROUTER_MAX_TOKENS = 8192
 MAX_OPENROUTER_RESPONSE_BYTES = 1_000_000
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
@@ -76,17 +82,22 @@ def generation_options() -> dict[str, float | int]:
 
 
 def llm_provider_name() -> str:
-    """Selected generation provider (PS_LLM_PROVIDER, default ollama).
+    """Selected generation provider (PS_LLM_PROVIDER).
 
-    Embeddings are deliberately not controlled by this setting; they always
-    use the local Ollama ``Embedder`` configured elsewhere.
+    Missing or invalid PS_LLM_PROVIDER must not silently select Ollama.
     """
-    raw = os.environ.get("PS_LLM_PROVIDER", DEFAULT_LLM_PROVIDER)
-    provider = raw.strip().lower() if raw else DEFAULT_LLM_PROVIDER
+    raw = os.environ.get("PS_LLM_PROVIDER")
+    if raw is None or not raw.strip():
+        raise ValueError("PS_LLM_PROVIDER must be set to 'openrouter'")
+    provider = raw.strip().lower()
     if provider not in SUPPORTED_LLM_PROVIDERS:
         raise ValueError(
             "PS_LLM_PROVIDER must be one of: "
             + ", ".join(sorted(SUPPORTED_LLM_PROVIDERS))
+        )
+    if provider != "openrouter":
+        raise ValueError(
+            "PS_LLM_PROVIDER must be 'openrouter' for external-only deployments"
         )
     return provider
 
@@ -163,6 +174,31 @@ def openrouter_timeout() -> float:
     return value
 
 
+def openrouter_max_tokens() -> int:
+    """Bounded output budget for OpenRouter (OPENROUTER_MAX_TOKENS).
+
+    Defaults to 2048 rather than the Ollama 256 because reasoning models count
+    their reasoning tokens against this budget; exhausting it yields empty
+    content. Read at request time so it can be tuned without a code change.
+    """
+    raw = os.environ.get("OPENROUTER_MAX_TOKENS")
+    if raw is None or not raw.strip():
+        return DEFAULT_OPENROUTER_MAX_TOKENS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "OPENROUTER_MAX_TOKENS must be an integer between 1 and "
+            f"{MAX_OPENROUTER_MAX_TOKENS}"
+        ) from exc
+    if value <= 0 or value > MAX_OPENROUTER_MAX_TOKENS:
+        raise ValueError(
+            "OPENROUTER_MAX_TOKENS must be an integer between 1 and "
+            f"{MAX_OPENROUTER_MAX_TOKENS}"
+        )
+    return value
+
+
 def validate_llm_configuration() -> str:
     """Fail fast on an invalid provider selection or incomplete OpenRouter config.
 
@@ -170,11 +206,17 @@ def validate_llm_configuration() -> str:
     the API key or prompt content.
     """
     provider = llm_provider_name()
-    if provider == "openrouter":
-        openrouter_api_key()
-        openrouter_model()
-        openrouter_base_url()
-        openrouter_timeout()
+    if provider != "openrouter":
+        raise ValueError("PS_LLM_PROVIDER must be 'openrouter'")
+    openrouter_api_key()
+    openrouter_model()
+    openrouter_base_url()
+    openrouter_timeout()
+    openrouter_max_tokens()
+
+    embed_provider = _embed_provider_name()
+    if embed_provider != "none":
+        raise ValueError("PS_EMBED_PROVIDER must be 'none'")
     return provider
 
 
@@ -371,11 +413,15 @@ class _OpenRouterChat:
                         "model": self.model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.2,
-                        "max_tokens": num_predict_tokens(),
+                        "max_tokens": openrouter_max_tokens(),
                         "stream": False,
                     },
                     timeout=self.timeout,
                 )
+            except httpx.TimeoutException as exc:
+                raise LLMUnavailableError(
+                    "AI service timed out; please retry shortly."
+                ) from exc
             except httpx.HTTPError as exc:
                 raise LLMUnavailableError("Could not reach the AI service.") from exc
         finally:
@@ -404,11 +450,24 @@ class _OpenRouterChat:
                 "AI service returned an unreadable response."
             ) from exc
 
+        # Some providers return HTTP 200 with an error-shaped body. Never echo
+        # its contents: they can contain request data or credentials.
+        if isinstance(payload, dict) and payload.get("error"):
+            raise LLMUnavailableError("AI service returned an error response.")
+
         choices = payload.get("choices") if isinstance(payload, dict) else None
         first = choices[0] if isinstance(choices, list) and choices else None
         message = first.get("message") if isinstance(first, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
+            finish_reason = (
+                first.get("finish_reason") if isinstance(first, dict) else None
+            )
+            if finish_reason == "length":
+                raise LLMUnavailableError(
+                    "AI service used its response limit before producing an "
+                    "answer; please retry."
+                )
             raise LLMUnavailableError("AI service returned an empty response.")
         return content.strip()
 
@@ -508,7 +567,7 @@ def get_summarizer() -> Summarizer:
     """
     if llm_provider_name() == "openrouter":
         return OpenRouterSummarizer()
-    return LocalOllamaSummarizer()
+    raise ValueError("PS_LLM_PROVIDER must be 'openrouter'")
 
 
 def list_models(url: str | None = None, timeout: float = HEALTH_TIMEOUT_SECONDS) -> list[str]:
@@ -643,7 +702,7 @@ def get_assistant() -> Assistant:
     """
     if llm_provider_name() == "openrouter":
         return OpenRouterAssistant()
-    return LocalOllamaAssistant()
+    raise ValueError("PS_LLM_PROVIDER must be 'openrouter'")
 
 
 # --- Embeddings ---------------------------------------------------------------
@@ -674,6 +733,56 @@ class Embedder(Protocol):
     dimension: int | None
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+def _embed_provider_name() -> str:
+    """Embedding provider selection.
+
+    For free external-only deployments set PS_EMBED_PROVIDER=none to disable
+    semantic indexing and query embedding while keeping keyword/ID retrieval.
+    Missing or invalid configuration must not silently enable Ollama.
+    """
+    raw = os.environ.get("PS_EMBED_PROVIDER")
+    if raw is None or not raw.strip():
+        raise ValueError("PS_EMBED_PROVIDER must be set to 'none'")
+    value = raw.strip().lower()
+    if value not in {"none", "ollama", "external"}:
+        raise ValueError(
+            "PS_EMBED_PROVIDER must be one of: none, ollama, external"
+        )
+    if value == "ollama":
+        raise ValueError(
+            "PS_EMBED_PROVIDER=ollama is disabled for external-only "
+            "deployments; set PS_EMBED_PROVIDER=none to use keyword/ID "
+            "retrieval only."
+        )
+    if value == "external":
+        raise ValueError(
+            "PS_EMBED_PROVIDER=external is not configured in this build; "
+            "set PS_EMBED_PROVIDER=none for external-only deployments."
+        )
+    return value
+
+
+class DisabledEmbedder:
+    """Embedder that explicitly disables semantic features.
+
+    No network calls are made. Callers must handle LLMUnavailableError and
+    fall back to keyword/ID retrieval. Indexing operations should return a
+    clear, safe response rather than attempting to call a provider.
+    """
+
+    def __init__(self) -> None:
+        self.embed_model = "disabled"
+        self.dimension: int | None = None
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        raise LLMUnavailableError(
+            "Semantic embeddings are disabled in this deployment. "
+            "Keyword and ID-based retrieval are still available."
+        )
 
 
 def _validate_vectors(payload: object, expected_count: int) -> list[list[float]]:
@@ -768,4 +877,7 @@ class LocalOllamaEmbedder:
 
 def get_embedder() -> Embedder:
     """FastAPI dependency — override in tests with a fake provider."""
-    return LocalOllamaEmbedder()
+    provider = _embed_provider_name()
+    if provider == "none":
+        return DisabledEmbedder()
+    raise ValueError("PS_EMBED_PROVIDER must be 'none'")
